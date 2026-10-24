@@ -142,7 +142,7 @@ final class NotesView: NSView, NSTableViewDataSource, NSTableViewDelegate, NSTex
 
     private func buildListPane() {
         listPane.wantsLayer = true
-        listPane.layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
+        listPane.layer?.backgroundColor = resolvedCGColor(NSColor.controlBackgroundColor)
         listPane.translatesAutoresizingMaskIntoConstraints = false
 
         titleLabel.font = .systemFont(ofSize: 15, weight: .semibold)
@@ -265,7 +265,7 @@ final class NotesView: NSView, NSTableViewDataSource, NSTableViewDelegate, NSTex
 
     private func buildEditorPane() {
         editorPane.wantsLayer = true
-        editorPane.layer?.backgroundColor = NSColor.textBackgroundColor.cgColor
+        editorPane.layer?.backgroundColor = resolvedCGColor(NSColor.textBackgroundColor)
         editorPane.translatesAutoresizingMaskIntoConstraints = false
 
         editorTitleLabel.font = .systemFont(ofSize: 15, weight: .semibold)
@@ -389,7 +389,7 @@ final class NotesView: NSView, NSTableViewDataSource, NSTableViewDelegate, NSTex
 
     private func buildLayout() {
         divider.wantsLayer = true
-        divider.layer?.backgroundColor = NSColor.separatorColor.cgColor
+        divider.layer?.backgroundColor = resolvedCGColor(NSColor.separatorColor)
         divider.translatesAutoresizingMaskIntoConstraints = false
 
         addSubview(listPane)
@@ -807,9 +807,9 @@ final class NotesView: NSView, NSTableViewDataSource, NSTableViewDelegate, NSTex
         super.viewDidChangeEffectiveAppearance()
         // Layer colours are resolved when they are set, so they have to be
         // refreshed when the user switches between light and dark.
-        listPane.layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
-        editorPane.layer?.backgroundColor = NSColor.textBackgroundColor.cgColor
-        divider.layer?.backgroundColor = NSColor.separatorColor.cgColor
+        listPane.layer?.backgroundColor = resolvedCGColor(NSColor.controlBackgroundColor)
+        editorPane.layer?.backgroundColor = resolvedCGColor(NSColor.textBackgroundColor)
+        divider.layer?.backgroundColor = resolvedCGColor(NSColor.separatorColor)
         for row in 0..<tableView.numberOfRows {
             let cell = tableView.view(atColumn: 0, row: row, makeIfNecessary: false) as? NoteRowView
             cell?.refreshAppearance()
@@ -987,8 +987,8 @@ final class NoteRowView: NSTableCellView {
 
     private func updateSelectionAppearance() {
         selectionBackground.layer?.backgroundColor = isRowSelected
-            ? Palette.wash(Palette.accent, amount: 0.16).cgColor
-            : NSColor.clear.cgColor
+            ? resolvedCGColor(Palette.wash(Palette.accent, amount: 0.16))
+            : resolvedCGColor(NSColor.clear)
     }
 
     @objc private func menuPressed() {

@@ -354,6 +354,22 @@ final class LibraryView: NSView, NSCollectionViewDataSource, NSCollectionViewDel
         refreshFilterChips()
     }
 
+    /// Re-apply every colour that was resolved when a view was built.
+    ///
+    /// A layer's background colour is resolved at the moment it is set, so
+    /// after the user switches macOS between light and dark the cards keep
+    /// the colours of the appearance they were built in — a white card with
+    /// a white title, which cannot be read.
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        for chip in filterButtons.values {
+            chip.refreshAppearance()
+        }
+        for item in collectionView.visibleItems() {
+            (item as? LibraryCardItem)?.refreshAppearance()
+        }
+    }
+
     /// Keep the chip counts and the selected chip in step with the store.
     private func refreshFilterChips() {
         let store = LibraryStore.shared
@@ -524,6 +540,15 @@ final class LibraryCardItem: NSCollectionViewItem {
     private let starButton = NSButton(title: "", target: nil, action: nil)
     private let readButton = NSButton(title: "", target: nil, action: nil)
 
+    /// The colours this card was built with.
+    ///
+    /// They are remembered rather than recomputed because a layer's
+    /// background colour is resolved when it is set: a card built in the
+    /// light appearance keeps its white background after the user switches
+    /// to dark, and the white title with it.
+    private var statusColour: NSColor = .tertiaryLabelColor
+    private var typeColour: NSColor = .secondaryLabelColor
+
     var onToggleFavourite: (() -> Void)?
     var onToggleRead: (() -> Void)?
 
@@ -532,9 +557,9 @@ final class LibraryCardItem: NSCollectionViewItem {
 
         card.wantsLayer = true
         card.layer?.cornerRadius = 10
-        card.layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
+        card.layer?.backgroundColor = card.resolvedCGColor(NSColor.controlBackgroundColor)
         card.layer?.borderWidth = 1
-        card.layer?.borderColor = NSColor.separatorColor.cgColor
+        card.layer?.borderColor = card.resolvedCGColor(NSColor.separatorColor)
         card.translatesAutoresizingMaskIntoConstraints = false
 
         typeBadge.font = Typography.caption(weight: .bold)
@@ -676,13 +701,12 @@ final class LibraryCardItem: NSCollectionViewItem {
             colour = .tertiaryLabelColor
         }
         statusLabel.stringValue = statusText
-        statusDot.layer?.backgroundColor = colour.cgColor
+        statusColour = colour
 
         // The badge takes the colour of the file type, so the grid reads at a
         // glance: violet for a book, blue for a paper.
-        let typeColour = Palette.colour(forFileType: document.fileType)
+        typeColour = Palette.colour(forFileType: document.fileType)
         typeBadge.textColor = typeColour
-        typeBadge.layer?.backgroundColor = Palette.wash(typeColour, amount: 0.15).cgColor
 
         // Favourite and read state come from the suite's own memory, not
         // from the backend, so they are true even for documents that have
@@ -697,6 +721,16 @@ final class LibraryCardItem: NSCollectionViewItem {
         readButton.image = NSImage(systemSymbolName: isRead ? "checkmark.circle.fill" : "circle",
                                    accessibilityDescription: isRead ? "Mark as unread" : "Mark as read")
         readButton.contentTintColor = isRead ? Palette.accent : .tertiaryLabelColor
+
+        refreshAppearance()
+    }
+
+    /// Re-apply every colour that was resolved when the card was built.
+    func refreshAppearance() {
+        card.layer?.backgroundColor = card.resolvedCGColor(NSColor.controlBackgroundColor)
+        card.layer?.borderColor = card.resolvedCGColor(NSColor.separatorColor)
+        statusDot.layer?.backgroundColor = statusDot.resolvedCGColor(statusColour)
+        typeBadge.layer?.backgroundColor = typeBadge.resolvedCGColor(Palette.wash(typeColour, amount: 0.15))
     }
 
     @objc private func menuPressed() {
@@ -765,6 +799,11 @@ final class FilterChip: NSButton {
         updateAppearance()
     }
 
+    /// Re-apply the colours after a light/dark switch.
+    func refreshAppearance() {
+        updateAppearance()
+    }
+
     private func updateAppearance() {
         // Each filter keeps its own colour, so the row reads as four
         // different questions rather than four grey labels.
@@ -800,9 +839,9 @@ final class FilterChip: NSButton {
         attributedTitle = title
 
         if isChosen {
-            layer?.backgroundColor = Palette.wash(colour, amount: 0.15).cgColor
+            layer?.backgroundColor = resolvedCGColor(Palette.wash(colour, amount: 0.15))
         } else {
-            layer?.backgroundColor = NSColor.clear.cgColor
+            layer?.backgroundColor = resolvedCGColor(NSColor.clear)
         }
     }
 

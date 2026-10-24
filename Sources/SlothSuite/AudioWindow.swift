@@ -1,6 +1,33 @@
 import Cocoa
 import Foundation
 
+/// The surface the audio window's chapters sit on.
+///
+/// A layer's background colour is resolved when it is set, so the window has
+/// to be told when the system appearance changes — otherwise the cards keep
+/// the colours of the appearance they were built in, and a white card with a
+/// white title cannot be read.
+private final class AudioContentView: NSView {
+
+    /// Called when the system appearance changes.
+    var onAppearanceChange: (() -> Void)?
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        layer?.backgroundColor = resolvedCGColor(NSColor.windowBackgroundColor)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        layer?.backgroundColor = resolvedCGColor(NSColor.windowBackgroundColor)
+        onAppearanceChange?()
+    }
+}
+
 /// A pop-out window that puts every chapter and its spoken script on one
 /// scrollable page.
 ///
@@ -54,11 +81,13 @@ final class AudioWindowController {
     // MARK: - Window
 
     private func buildWindow() {
-        let content = NSView()
         // A real surface, so the headings and buttons have something to read
-        // against.
-        content.wantsLayer = true
-        content.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+        // against. The surface repaints itself when the system appearance
+        // changes.
+        let content = AudioContentView()
+        content.onAppearanceChange = { [weak self] in
+            self?.refreshAppearance()
+        }
 
         // Auto Layout positions these, so the autoresizing mask must not
         // fight it — a view with the mask on keeps its old frame and is
@@ -168,6 +197,9 @@ final class AudioWindowController {
             : "\(briefing.chapters.count) chapter\(briefing.chapters.count == 1 ? "" : "s") · roughly \(minutes) min of audio"
 
         chapterStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        // The old cards are gone; keeping them would repaint views that are
+        // no longer on screen.
+        chapterCards = []
 
         guard !briefing.chapters.isEmpty else {
             let empty = NSTextField(labelWithString: "This briefing has no chapters to read yet.")
@@ -177,22 +209,54 @@ final class AudioWindowController {
             return
         }
 
+        var cards: [(card: NSView, number: NSTextField, playButton: NSButton)] = []
         for (index, chapter) in briefing.chapters.enumerated() {
             // The card goes into the stack first: a constraint between the
             // card and the stack has no common ancestor until the card is
             // actually in it.
             let card = NSView()
             chapterStack.addArrangedSubview(card)
-            configureCard(card, chapter: chapter, index: index)
+            let parts = configureCard(card, chapter: chapter, index: index)
+            cards.append(parts)
+        }
+        chapterCards = cards
+    }
+
+    /// The parts of each chapter card that carry a colour.
+    ///
+    /// A layer's background colour is resolved when it is set, so a card
+    /// built in the light appearance keeps its white background after the
+    /// user switches to dark — and the white title with it.
+    private var chapterCards: [(card: NSView, number: NSTextField, playButton: NSButton)] = []
+
+    /// Re-apply every colour that was resolved when the window was built.
+    ///
+    /// A layer's background colour is resolved at the moment it is set, so
+    /// after the user switches macOS between light and dark the cards keep
+    /// the colours of the appearance they were built in.
+    private func refreshAppearance() {
+        window?.contentView?.layer?.backgroundColor =
+            window?.contentView?.resolvedCGColor(NSColor.windowBackgroundColor)
+        for entry in chapterCards {
+            entry.card.layer?.backgroundColor = entry.card.resolvedCGColor(NSColor.controlBackgroundColor)
+            entry.card.layer?.borderColor = entry.card.resolvedCGColor(NSColor.separatorColor)
+            entry.number.layer?.backgroundColor =
+                entry.number.resolvedCGColor(Palette.wash(Palette.accent, amount: 0.16))
+            entry.playButton.contentTintColor = Palette.accent
+            entry.playButton.setColoredTitle("Play", color: Palette.accent,
+                                             font: Typography.body(weight: .medium))
         }
     }
 
-    private func configureCard(_ card: NSView, chapter: BriefingChapter, index: Int) {
+    @discardableResult
+    private func configureCard(_ card: NSView,
+                               chapter: BriefingChapter,
+                               index: Int) -> (card: NSView, number: NSTextField, playButton: NSButton) {
         card.wantsLayer = true
         card.layer?.cornerRadius = 12
-        card.layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
+        card.layer?.backgroundColor = card.resolvedCGColor(NSColor.controlBackgroundColor)
         card.layer?.borderWidth = 1
-        card.layer?.borderColor = NSColor.separatorColor.cgColor
+        card.layer?.borderColor = card.resolvedCGColor(NSColor.separatorColor)
         card.translatesAutoresizingMaskIntoConstraints = false
 
         let number = NSTextField(labelWithString: "\(index + 1)")
@@ -201,7 +265,7 @@ final class AudioWindowController {
         number.alignment = .center
         number.wantsLayer = true
         number.layer?.cornerRadius = 9
-        number.layer?.backgroundColor = Palette.wash(Palette.accent, amount: 0.16).cgColor
+        number.layer?.backgroundColor = number.resolvedCGColor(Palette.wash(Palette.accent, amount: 0.16))
         number.translatesAutoresizingMaskIntoConstraints = false
 
         let name = NSTextField(labelWithString: chapter.title)
@@ -266,6 +330,8 @@ final class AudioWindowController {
         // The card is as wide as the page, so the script has a proper measure
         // to wrap in instead of being squeezed to nothing.
         card.widthAnchor.constraint(equalTo: chapterStack.widthAnchor).isActive = true
+
+        return (card, number, playButton)
     }
 
     // MARK: - Playing

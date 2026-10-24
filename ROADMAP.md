@@ -177,6 +177,71 @@ nothing to do with the model being there.
 allows 180 seconds, so the Mac provider works; it is just not quick. The
 gate's budget is now 240 seconds to match.
 
+## Phase 6 — the colours that did not survive the switch
+
+*"Make sure no bugs."* The colour work was in, the notes were fixed, and the
+gate was green. But the interface was still wrong in one way that no test
+could see: **switching macOS between light and dark while the app was running
+left it half-dark and unreadable.** White titles on white cards.
+
+### Why it happened
+
+A layer keeps the colour it was given. `layer.backgroundColor = someColour.cgColor`
+resolves a dynamic colour **once**, at the moment it is set, and freezes it
+there. A card built in the light appearance keeps its white background after
+the user switches to dark — and its title, which is an ordinary `NSTextField`
+with a dynamic `textColor`, does follow the system. White text on a white
+card: invisible.
+
+Only `NotesView` was listening for the change at all. Every other view cached
+its colours and never looked again.
+
+### Three separate mistakes, each enough on its own
+
+1. **Nothing was listening.** Only the notes view implemented
+   `viewDidChangeEffectiveAppearance`. The sidebar, the library cards, the
+   reader's chips and the audio window never repainted.
+2. **The wrong notification.** The audio window listened for
+   `NSWindow.appearanceChangeNotification`, which does not exist — it would
+   not have compiled, had it been written against the real API.
+3. **The colour was resolved against the wrong appearance.** This is the
+   subtle one, and it is the reason a first attempt at the fix still rendered
+   white cards.
+
+`NSColor.cgColor` resolves against the **current drawing appearance**. During
+an appearance change that is still the *old* one — a view that repaints itself
+from `viewDidChangeEffectiveAppearance` resolves the old colour and looks as
+though nothing had happened. The colour has to be resolved against an
+explicit appearance, with `performAsCurrentDrawingAppearance`.
+
+And it has to be the **window's** appearance, not the view's own. AppKit
+updates the tree from the top down: when a parent is told the appearance
+changed, its children still report the old one. A card refreshed by its
+parent would be handed the colours of the appearance the user just left —
+which is exactly what the first attempt produced, and why the library cards
+stayed white while the sidebar, refreshed directly, turned dark.
+
+### The fix
+
+- `resolveCGColor(_:in:)` resolves a dynamic colour against a named
+  appearance, and `NSView.resolvedCGColor(_:)` resolves it against the
+  window's appearance. Every layer colour in the suite now goes through it.
+- Every view that paints a layer implements `viewDidChangeEffectiveAppearance`
+  and repaints itself: the sidebar, the library's cards and filter chips, the
+  reader's chips and chapter pills, the notes, the content surface, and the
+  audio window's chapter cards.
+- The audio window's surface is its own view class, which tells the controller
+  to repaint the cards when the system appearance changes.
+
+### How it is checked
+
+`--toggle-dark` renders the interface *after* switching the appearance at
+runtime, which is the only way to see whether the views repaint themselves
+rather than keeping the colours they were built with. The library, the
+reader, the notes and the audio window were all rendered that way and read
+correctly — dark cards, readable titles, badges and chips in their dark
+variants.
+
 ## Phase 3 — the third ten: a learning desk, not a shell
 
 The brief was a redesign: functional buttons, a real library, and the old

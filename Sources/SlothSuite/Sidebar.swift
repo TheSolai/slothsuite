@@ -139,6 +139,18 @@ final class SidebarView: NSVisualEffectView {
         }
     }
 
+    /// Re-apply every colour that was resolved when a button was built.
+    ///
+    /// A layer's background colour is resolved at the moment it is set, so
+    /// after the user switches macOS between light and dark the selected
+    /// row keeps the wash of the appearance it was drawn in.
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        for button in navButtons.values {
+            button.refreshAppearance()
+        }
+    }
+
     /// One quiet line: what is running.
     func setStatus(_ text: String) {
         statusLabel.stringValue = text
@@ -277,12 +289,17 @@ final class NavButton: NSButton {
         isHovering = false
     }
 
+    /// Re-apply the colours after a light/dark switch.
+    func refreshAppearance() {
+        updateAppearance()
+    }
+
     private func updateAppearance() {
         guard module.isAvailable else {
             contentTintColor = .tertiaryLabelColor
             font = Typography.body(weight: .regular)
             alphaValue = 0.5
-            layer?.backgroundColor = NSColor.clear.cgColor
+            layer?.backgroundColor = resolvedCGColor(NSColor.clear)
             return
         }
 
@@ -294,15 +311,15 @@ final class NavButton: NSButton {
 
         if isChosen {
             // A filled pill, the way macOS marks the current source list row.
-            layer?.backgroundColor = Palette.wash(colour, amount: 0.18).cgColor
+            layer?.backgroundColor = resolvedCGColor(Palette.wash(colour, amount: 0.18))
             contentTintColor = colour
             font = Typography.body(weight: .semibold)
         } else if isHovering {
-            layer?.backgroundColor = Palette.wash(colour, amount: 0.09).cgColor
+            layer?.backgroundColor = resolvedCGColor(Palette.wash(colour, amount: 0.09))
             contentTintColor = colour
             font = Typography.body(weight: .medium)
         } else {
-            layer?.backgroundColor = NSColor.clear.cgColor
+            layer?.backgroundColor = resolvedCGColor(NSColor.clear)
             contentTintColor = colour.withAlphaComponent(0.75)
             font = Typography.body(weight: .medium)
         }

@@ -106,6 +106,45 @@ enum Palette {
     }
 }
 
+// MARK: - Appearance
+
+/// Resolve a dynamic colour into a `CGColor` for a particular appearance.
+///
+/// `NSColor.cgColor` resolves against the *current* drawing appearance, and
+/// during an appearance change that is still the old one. A view that
+/// repaints itself from `viewDidChangeEffectiveAppearance` would therefore
+/// resolve the old colour and look as though nothing had happened — the
+/// white card and the white title that made the dark appearance unreadable.
+///
+/// Resolving against an explicit appearance is also what a window with its
+/// own appearance needs: the ambient colour follows the app, not the window.
+func resolveCGColor(_ colour: NSColor, in appearance: NSAppearance) -> CGColor {
+    var resolved: CGColor = colour.cgColor
+    appearance.performAsCurrentDrawingAppearance {
+        resolved = colour.cgColor
+    }
+    return resolved
+}
+
+extension NSView {
+
+    /// Resolve a dynamic colour against the appearance this view is moving to.
+    ///
+    /// Every layer colour has to be set through this. A layer keeps the
+    /// colour it was given, so a colour resolved with a plain `.cgColor` is
+    /// frozen at the moment it was set and never follows the system.
+    ///
+    /// The window's appearance is the one to resolve against, not this view's
+    /// own. AppKit updates the tree from the top down, so when a parent is
+    /// told the appearance has changed, its children still report the old
+    /// one — a card refreshed by its parent would be given the colours of
+    /// the appearance the user just left.
+    func resolvedCGColor(_ colour: NSColor) -> CGColor {
+        let appearance = window?.effectiveAppearance ?? effectiveAppearance
+        return resolveCGColor(colour, in: appearance)
+    }
+}
+
 // MARK: - Tinted buttons
 
 extension NSButton {

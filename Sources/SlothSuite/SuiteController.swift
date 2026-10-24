@@ -4,6 +4,36 @@ import ServiceManagement
 import UserNotifications
 import WebKit
 
+// MARK: - The content surface
+
+/// The surface the modules sit on.
+///
+/// It paints the window background rather than staying transparent, so the
+/// modules sit on a real surface instead of whatever happens to be behind
+/// them. A layer's background colour is resolved when it is set, so the
+/// surface has to repaint itself when the user switches macOS between light
+/// and dark.
+final class ContentContainerView: NSView {
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        refreshAppearance()
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        refreshAppearance()
+    }
+
+    func refreshAppearance() {
+        layer?.backgroundColor = resolvedCGColor(NSColor.windowBackgroundColor)
+    }
+}
+
 /// The suite shell: a native window over the local learning apps.
 ///
 /// The central change from the original single-webview design is that each
@@ -84,6 +114,14 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
     // MARK: - Lifecycle
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // The dark palette has to be asked for explicitly: a process launched
+        // from a terminal does not inherit the system's appearance. This has
+        // to happen before the views are built, because a view resolves its
+        // colours when it is created.
+        if Self.wantsDarkAppearance() {
+            NSApp.appearance = NSAppearance(named: .darkAqua)
+        }
+
         MacServices.shared.launch()
 
         buildWindow()
@@ -184,6 +222,26 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
         return CommandLine.arguments[index + 1]
     }
 
+    /// An optional `--dark` for the snapshot.
+    ///
+    /// The system appearance is a user default that a command-line process
+    /// does not pick up on its own, so the dark palette could not be looked
+    /// at without this.
+    private static func wantsDarkAppearance() -> Bool {
+        CommandLine.arguments.contains("--dark")
+    }
+
+    /// Switch the appearance while the app is running.
+    ///
+    /// `--toggle-dark` renders the interface after the appearance has been
+    /// switched. This is the only way to see whether the views repaint
+    /// themselves when macOS changes, or whether they keep the colours they
+    /// were built with — which is what left the dark appearance unreadable.
+    private func toggleAppearanceIfAsked() {
+        guard CommandLine.arguments.contains("--toggle-dark") else { return }
+        NSApp.appearance = NSAppearance(named: .darkAqua)
+        Log.shared.write("snapshot — switched to the dark appearance while running")
+    }
 
     private func runSnapshot() {
         guard let request = Self.snapshotRequest() else { return }
@@ -213,7 +271,12 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
                 DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
                     self.openAudioWindowForInspection()
                     DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
-                        self.captureWindow(to: request.path, in: .audio)
+                        // Switch after the window has been built, so the
+                        // cards have to repaint themselves.
+                        self.toggleAppearanceIfAsked()
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                            self.captureWindow(to: request.path, in: .audio)
+                        }
                     }
                 }
                 return
@@ -227,6 +290,11 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
             if let action = Self.snapshotAction() {
                 self.performSnapshotAction(action)
             }
+
+            // Switch the appearance after the views have been built, so the
+            // render shows the runtime path rather than the one that happens
+            // before the views exist.
+            self.toggleAppearanceIfAsked()
 
             // Let the module lay out and, for the reader, fetch its briefing.
             DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
@@ -327,8 +395,9 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
 
     func applicationWillTerminate(_ notification: Notification) {
         // The notes editor saves on a debounce, so the last words typed can
-        // still be in flight when the app is asked to quit.
-        notesView.flushPendingSave()
+        // still be in flight when the app is asked to quit. The view may not
+        // exist at all if the app never finished launching.
+        notesView?.flushPendingSave()
         // The store writes on its own queue, which the app is about to leave
         // behind. Everything goes to the disk now, while there is still time.
         LearningStore.shared.saveNow()
@@ -375,14 +444,13 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
         }
         sidebar.widthAnchor.constraint(equalToConstant: 228).isActive = true
 
-        contentContainer = NSView()
+        contentContainer = ContentContainerView()
         contentContainer.translatesAutoresizingMaskIntoConstraints = false
         // The content area paints the window background rather than staying
         // transparent, so the modules sit on a real surface instead of
         // whatever happens to be behind them.
         contentContainer.wantsLayer = true
-        contentContainer.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
-
+        contentContainer.layer?.backgroundColor = contentContainer.resolvedCGColor(NSColor.windowBackgroundColor)
         // The native library.
         libraryView = LibraryView()
         libraryView.translatesAutoresizingMaskIntoConstraints = false

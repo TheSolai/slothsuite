@@ -53,7 +53,7 @@ final class DropView: NSView {
         guard highlight == nil else { return }
         let border = NSView(frame: bounds)
         border.wantsLayer = true
-        border.layer?.borderColor = NSColor.controlAccentColor.cgColor
+        border.layer?.borderColor = border.resolvedCGColor(NSColor.controlAccentColor)
         border.layer?.borderWidth = 3
         border.layer?.cornerRadius = 10
         addSubview(border)

@@ -305,6 +305,17 @@ Every colour is defined for light and dark, so the suite follows the system
 appearance. The fonts are all still the system sans: no serif, no display
 faces.
 
+Following the system is not automatic, and the reason is worth knowing if you
+touch the palette. **A layer keeps the colour it was given**: setting
+`layer.backgroundColor` resolves a dynamic colour once, at that moment, and
+freezes it. So every view that paints a layer re-resolves its colours when
+macOS changes appearance — against the *window's* appearance, because AppKit
+updates the view tree from the top down and a child still reports the old
+appearance while its parent is being told about the change.
+
+`Palette.swift` has the helper for it: `resolvedCGColor(_:)` resolves a
+colour against the right appearance. If you add a coloured layer, use it.
+
 The colours are not decoration — each one means something:
 
 | colour | what it marks |

@@ -63,6 +63,10 @@ final class ReaderView: NSView {
     private var lastReportedChapter = 0
 
     private var chapterPills: [ChapterPill] = []
+
+    /// The chips of metadata under the title. Kept so their colours can be
+    /// re-applied after a light/dark switch.
+    private var chips: [ReaderChip] = []
     /// How wide the chapter row needs to be for all of its pills.
     private var chapterRowWidth: CGFloat = 0
     private var chipStackWidth: NSLayoutConstraint?
@@ -415,10 +419,27 @@ final class ReaderView: NSView {
         for chip in chips {
             chipStack.addArrangedSubview(chip)
         }
+        self.chips = chips
 
         let width = chips.reduce(CGFloat(0)) { $0 + $1.intrinsicContentSize.width }
             + CGFloat(max(0, chips.count - 1)) * chipStack.spacing
         chipStackWidth?.constant = width
+    }
+
+    /// Re-apply every colour that was resolved when a view was built.
+    ///
+    /// A layer's background colour is resolved at the moment it is set, so
+    /// after the user switches macOS between light and dark the chips and
+    /// pills keep the colours of the appearance they were built in — which
+    /// on a dark background means pale text on a pale wash, unreadable.
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        for chip in chips {
+            chip.refreshAppearance()
+        }
+        for pill in chapterPills {
+            pill.refreshAppearance()
+        }
     }
 
     private static func grouped(_ number: Int) -> String {
@@ -770,13 +791,13 @@ private final class ChapterPill: NSButton {
         let colour: NSColor
         if isChosen {
             // A filled pill, the way macOS marks the current row.
-            layer?.backgroundColor = Palette.wash(Palette.accent, amount: 0.18).cgColor
+            layer?.backgroundColor = resolvedCGColor(Palette.wash(Palette.accent, amount: 0.18))
             colour = .labelColor
         } else if isHovering {
-            layer?.backgroundColor = NSColor.labelColor.withAlphaComponent(0.07).cgColor
+            layer?.backgroundColor = resolvedCGColor(NSColor.labelColor.withAlphaComponent(0.07))
             colour = .labelColor
         } else {
-            layer?.backgroundColor = NSColor.clear.cgColor
+            layer?.backgroundColor = resolvedCGColor(NSColor.clear)
             colour = .secondaryLabelColor
         }
 
@@ -784,6 +805,11 @@ private final class ChapterPill: NSButton {
             .font: font as Any,
             .foregroundColor: colour
         ])
+    }
+
+    /// Re-apply the colours after a light/dark switch.
+    func refreshAppearance() {
+        updateAppearance()
     }
 }
 
@@ -812,7 +838,7 @@ private final class ReaderChip: NSView {
 
         wantsLayer = true
         layer?.cornerRadius = 5
-        layer?.backgroundColor = Palette.wash(colour, amount: 0.12).cgColor
+        layer?.backgroundColor = resolvedCGColor(Palette.wash(colour, amount: 0.12))
 
         label.font = .systemFont(ofSize: 10, weight: .medium)
         label.textColor = colour
@@ -827,6 +853,16 @@ private final class ReaderChip: NSView {
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    /// Re-apply the colours after a light/dark switch.
+    ///
+    /// A layer's background colour is resolved when it is set, so a chip
+    /// built in the light appearance keeps its pale wash after the user
+    /// switches to dark.
+    func refreshAppearance() {
+        layer?.backgroundColor = resolvedCGColor(Palette.wash(colour, amount: 0.12))
+        label.textColor = colour
+    }
 
     override var intrinsicContentSize: NSSize {
         NSSize(width: label.intrinsicContentSize.width + 14, height: 19)
