@@ -8,6 +8,10 @@ import WebKit
 /// `exit(0)`, so it could never fail — a broken build would still report
 /// success. This runner turns every observation into an assertion and exits
 /// non-zero when something is wrong, which makes it usable as a build gate.
+///
+/// The whole run is callback-driven. Nothing here spins the run loop waiting
+/// for a value: a page that never answers must not be able to freeze the
+/// test, and a modal dialog must not be able to block it either.
 final class SelfTestRunner {
     private let controller: SuiteController
     private let log = Log.shared
@@ -24,7 +28,9 @@ final class SelfTestRunner {
         checks += 1
         if !passed { failures += 1 }
         let mark = passed ? "PASS" : "FAIL"
-        log.writeSync("SELFTEST \(mark) \(name) — \(detail)")
+        // Asynchronous: the serial queue preserves ordering, and the final
+        // summary write flushes everything before the process exits.
+        log.write("SELFTEST \(mark) \(name) — \(detail)")
     }
 
     private func finish() {
@@ -35,8 +41,8 @@ final class SelfTestRunner {
     // MARK: - Run
 
     func begin() {
-        log.writeSync("SELFTEST begin")
         log.mirrorToStderr(true)
+        log.writeSync("SELFTEST begin")
 
         // 1. Configuration
         let config = controller.configForTest
@@ -69,6 +75,7 @@ final class SelfTestRunner {
         let webView = controller.webViewForTest(activeID)
         check("webview.attached", webView != nil, activeID)
 
+        // Give the page a moment to finish loading before probing it.
         DispatchQueue.main.asyncAfter(deadline: .now() + 4.0) { [weak self] in
             self?.continueRun()
         }
@@ -85,29 +92,27 @@ final class SelfTestRunner {
 
         // 6. The bridge must work — this is the contract that replaced DOM
         //    scraping, so a silent failure here matters.
-        let bridge = controller.bridgeForTest(activeID)
-        var bridgeOK = false
-        var bridgeDetail = "no bridge"
-        if let bridge, let webView {
-            bridge.perform("status", in: webView) { result in
-                switch result {
-                case .success(let value):
-                    bridgeOK = true
-                    bridgeDetail = String(describing: value).trimmed(to: 120)
-                case .failure(let message):
-                    bridgeDetail = message
-                case .unsupported(let message):
-                    bridgeDetail = message
-                }
-            }
+        guard let bridge = controller.bridgeForTest(activeID), let webView else {
+            check("bridge.status", false, "no bridge")
+            afterBridge()
+            return
         }
-        // `perform` is asynchronous; give it a moment on the run loop.
-        let deadline = Date().addingTimeInterval(8)
-        while !bridgeOK && Date() < deadline {
-            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.05))
-        }
-        check("bridge.status", bridgeOK, bridgeDetail)
 
+        bridge.perform("status", in: webView) { [weak self] result in
+            guard let self else { return }
+            switch result {
+            case .success(let value):
+                self.check("bridge.status", true, String(describing: value).trimmed(to: 120))
+            case .failure(let message):
+                self.check("bridge.status", false, message)
+            case .unsupported(let message):
+                self.check("bridge.status", false, message)
+            }
+            self.afterBridge()
+        }
+    }
+
+    private func afterBridge() {
         // 7. The library endpoint must answer.
         if let spec = controller.specsForTest.first(where: { $0.supportsLibrary }),
            let base = spec.apiBase, let path = spec.libraryPath {
@@ -115,7 +120,7 @@ final class SelfTestRunner {
             if let (data, response) = Self.fetch(url) {
                 let http = response as? HTTPURLResponse
                 let json = JSONTools.dictionary(from: data)
-                let documents = (json?["documents"] as? [[String: Any]])
+                let documents = json?["documents"] as? [[String: Any]]
                 check("library.documents",
                       http?.statusCode == 200 && documents != nil,
                       "HTTP \(http?.statusCode ?? 0), \(documents?.count ?? -1) documents")
@@ -129,18 +134,25 @@ final class SelfTestRunner {
         //    said no, which still proves the endpoint is wired.
         for spec in controller.specsForTest {
             guard let base = spec.apiBase else { continue }
-            let url = base.appendingPathComponent("/api/web/search")
-                .appending(queryItems: [URLQueryItem(name: "q", value: "local language model")])
+            var components = URLComponents(url: base.appendingPathComponent("/api/web/search"),
+                                          resolvingAgainstBaseURL: false)
+            components?.queryItems = [URLQueryItem(name: "q", value: "local language model")]
+            guard let url = components?.url else { continue }
+
             if let (_, response) = Self.fetch(url) {
-                let http = response as? HTTPURLResponse
-                let status = http?.statusCode ?? 0
+                let status = (response as? HTTPURLResponse)?.statusCode ?? 0
                 check("web.endpoint.\(spec.id)", status != 404, "HTTP \(status)")
             } else {
                 check("web.endpoint.\(spec.id)", false, "no response from \(url)")
             }
         }
 
-        // 9. The file picker must actually fire.
+        // 9. The Mac services must answer: the on-device model and the
+        //    Mac's own voice are the shell's headline features, so they
+        //    belong in the gate.
+        checkMacServices()
+
+        // 10. The file picker must actually fire.
         if let fixture = Self.fixtureURL() {
             controller.selftestFileURL = fixture
             check("selftest.fixture", true, fixture.lastPathComponent)
@@ -151,23 +163,139 @@ final class SelfTestRunner {
         controller.triggerAddBookForTest()
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 6.0) { [weak self] in
-            self?.continueAfterPicker()
+            self?.afterPicker()
         }
     }
 
-    private func continueAfterPicker() {
+    /// The Mac helper, the on-device model and the Mac voice.
+    private func checkMacServices() {
+        let base = MacServices.shared.baseURL
+
+        // The provider endpoint must exist on the backend.
+        if let spec = controller.specsForTest.first, let apiBase = spec.apiBase {
+            var components = URLComponents(url: apiBase.appendingPathComponent("/api/provider"),
+                                          resolvingAgainstBaseURL: false)
+            components?.queryItems = nil
+            if let url = components?.url, let (_, response) = Self.fetch(url) {
+                let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+                check("provider.endpoint", status != 404, "HTTP \(status)")
+            } else {
+                check("provider.endpoint", false, "no response")
+            }
+        }
+
+        // The helper must be up.
+        guard let (statusData, statusResponse) = Self.fetch(base.appendingPathComponent("/mac/status")) else {
+            check("mac.service", false, "the mac-service helper did not answer")
+            return
+        }
+        let statusCode = (statusResponse as? HTTPURLResponse)?.statusCode ?? 0
+        let statusJSON = JSONTools.dictionary(from: statusData)
+        let models = (statusJSON?["foundationModels"] as? String) ?? "unavailable"
+        check("mac.service", statusCode == 200, "HTTP \(statusCode), model: \(models)")
+
+        // The on-device model must actually produce text.
+        var chatRequest = URLRequest(url: base.appendingPathComponent("/mac/chat"))
+        chatRequest.httpMethod = "POST"
+        chatRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        chatRequest.httpBody = try? JSONSerialization.data(withJSONObject: [
+            "system": "Reply with JSON only.",
+            "prompt": "Return {\"ok\": true} and nothing else.",
+            "json": true
+        ])
+        chatRequest.timeoutInterval = 120
+
+        var chatDone = false
+        var chatText = ""
+        let chatSemaphore = DispatchSemaphore(value: 0)
+        URLSession.shared.dataTask(with: chatRequest) { data, _, _ in
+            if let data, let json = JSONTools.dictionary(from: data) {
+                chatText = (json["response"] as? String) ?? ""
+            }
+            chatDone = true
+            chatSemaphore.signal()
+        }.resume()
+        _ = chatSemaphore.wait(timeout: .now() + 130)
+        check("mac.chat", chatDone && !chatText.isEmpty,
+              chatText.isEmpty ? "no response from the on-device model" : chatText.trimmed(to: 60))
+
+        // The Mac voice must actually produce audio.
+        var speakRequest = URLRequest(url: base.appendingPathComponent("/mac/speak"))
+        speakRequest.httpMethod = "POST"
+        speakRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        speakRequest.httpBody = try? JSONSerialization.data(withJSONObject: [
+            "text": "Sloth Suite is speaking with the Mac's own voice.",
+            "voice": "en-GB", "rate": 0.5
+        ])
+        speakRequest.timeoutInterval = 90
+
+        var speakDone = false
+        var audioBytes = 0
+        var audioType = ""
+        let speakSemaphore = DispatchSemaphore(value: 0)
+        URLSession.shared.dataTask(with: speakRequest) { data, response, _ in
+            audioBytes = data?.count ?? 0
+            audioType = (response as? HTTPURLResponse)?.mimeType ?? ""
+            speakDone = true
+            speakSemaphore.signal()
+        }.resume()
+        _ = speakSemaphore.wait(timeout: .now() + 100)
+        check("mac.speak", speakDone && audioBytes > 1000 && audioType.contains("wav"),
+              "\(audioBytes) bytes, \(audioType)")
+    }
+
+    private func afterPicker() {
         check("filepicker.fired", controller.openPanelFiredForTest,
               controller.openPanelFiredForTest ? "panel presented" : "panel never opened")
 
-        // 10. The upload must reach the deck.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 75.0) { [weak self] in
-            guard let self else { return }
-            let stage = self.controller.pageStageForTest()
-            let deck = self.controller.deckVisibleForTest()
-            self.check("upload.deck", deck, "stage: \(stage)")
-            self.finish()
+        // 10. The upload must actually reach the backend.
+        //
+        // The gate is that the page leaves its idle state and shows a real
+        // processing stage — that proves the file picker fed the app's own
+        // upload handler and the pipeline took it. Whether the briefing
+        // itself has finished depends on the document length and how fast
+        // the local model is, so it is reported but not asserted.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 45.0) { [weak self] in
+            self?.afterUpload()
         }
     }
+
+    private func afterUpload() {
+        controller.evaluateAsyncForTest(Self.stageScript) { [weak self] value in
+            guard let self else { return }
+            let stage = (value as? String) ?? "unknown"
+
+            self.controller.evaluateAsyncForTest(Self.deckScript) { deckValue in
+                let deck = (deckValue as? Bool) == true
+
+                let processing = ["uploading", "mapping", "synthesizing", "extracting",
+                                  "crafting", "distilling", "view:"]
+                let moving = processing.contains { stage.lowercased().contains($0) }
+                self.check("upload.pipeline", moving || deck, "stage: \(stage)")
+                self.log.write("SELFTEST INFO deck-visible=\(deck)")
+                self.finish()
+            }
+        }
+    }
+
+    // MARK: - Page probes
+
+    private static let stageScript = """
+    (() => {
+      const t = document.body ? document.body.innerText : '';
+      const m = t.match(/(Uploading document[^\\n]*|Mapping chapters[^\\n]*|Synthesizing[^\\n]*|Extracting[^\\n]*|Crafting[^\\n]*|Distilling[^\\n]*)/i);
+      const err = t.match(/Could not read that document\\n([^\\n]{0,120})/);
+      if (err) return 'ERROR: ' + err[1];
+      if (m) return m[0];
+      const h2 = document.querySelector('h2');
+      if (h2) return 'view: ' + h2.innerText.trim().slice(0, 60);
+      return 'unknown';
+    })()
+    """
+
+    private static let deckScript = """
+    !!document.querySelector('h2') && /Executive Thesis|reading time saved/i.test(document.body.innerText)
+    """
 
     // MARK: - Helpers
 

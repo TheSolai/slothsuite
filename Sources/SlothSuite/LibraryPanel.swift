@@ -4,14 +4,18 @@ import Cocoa
 ///
 /// The library used to live entirely inside the web app, so the only way to
 /// find a book again was to open the web app and look. The backend already
-/// exposes `GET /api/documents`, so the shell can list them natively and open
-/// one with a single click.
+/// exposes `GET /api/documents`, so the shell can list them natively, filter
+/// them, open one with a single click, and remove one.
 final class LibraryPanel: NSView {
     var onOpen: ((String) -> Void)?
+    var onDelete: ((String, String) -> Void)?
 
     private let scrollView = NSScrollView()
     private let stack = NSStackView()
     private let placeholder = NSTextField(labelWithString: "No documents yet")
+
+    private var documents: [[String: Any]] = []
+    private var filter = ""
 
     init() {
         super.init(frame: .zero)
@@ -41,6 +45,12 @@ final class LibraryPanel: NSView {
         preferred.priority = .defaultLow
         preferred.isActive = true
 
+        // The stack lives inside the scroll view's clip view. These
+        // constraints are added once, here — adding them on every reload
+        // would pile up duplicates and eventually make Auto Layout thrash.
+        stack.leadingAnchor.constraint(equalTo: scrollView.contentView.leadingAnchor, constant: 2).isActive = true
+        stack.topAnchor.constraint(equalTo: scrollView.contentView.topAnchor, constant: 2).isActive = true
+
         showPlaceholder("No documents yet")
     }
 
@@ -53,6 +63,12 @@ final class LibraryPanel: NSView {
         stack.arrangedSubviews.forEach { $0.removeFromSuperview() }
         placeholder.stringValue = text
         stack.addArrangedSubview(placeholder)
+    }
+
+    /// Filter the list by title, author or filename.
+    func setFilter(_ query: String) {
+        filter = query.trimmingCharacters(in: .whitespaces).lowercased()
+        render()
     }
 
     /// Fetch the library from the app's API and redraw.
@@ -83,26 +99,43 @@ final class LibraryPanel: NSView {
                     return
                 }
 
-                self.render(documents, spec: spec)
+                self.documents = documents
+                self.render()
             }
         }.resume()
     }
 
-    private func render(_ documents: [[String: Any]], spec: AppSpec) {
+    private func render() {
         stack.arrangedSubviews.forEach { $0.removeFromSuperview() }
 
-        guard !documents.isEmpty else {
-            showPlaceholder("No documents yet")
+        let filtered = documents.filter { document in
+            guard !filter.isEmpty else { return true }
+            let title = (document["title"] as? String) ?? ""
+            let author = (document["author"] as? String) ?? ""
+            let filename = (document["filename"] as? String) ?? ""
+            return title.lowercased().contains(filter)
+                || author.lowercased().contains(filter)
+                || filename.lowercased().contains(filter)
+        }
+
+        guard !filtered.isEmpty else {
+            showPlaceholder(documents.isEmpty ? "No documents yet" : "Nothing matches that filter")
             return
         }
 
-        for document in documents.prefix(12) {
+        for document in filtered.prefix(12) {
             let id = (document["doc_id"] as? String) ?? ""
             let title = (document["title"] as? String) ?? (document["filename"] as? String) ?? "Untitled"
             let state = (document["status"] as? String) ?? "unknown"
             let minutes = (document["time_saved_minutes"] as? Int) ?? 0
 
-            let button = NSButton(title: title.trimmed(to: 34), target: self, action: #selector(rowClicked(_:)))
+            let row = NSStackView()
+            row.orientation = .horizontal
+            row.alignment = .centerY
+            row.spacing = 4
+            row.translatesAutoresizingMaskIntoConstraints = false
+
+            let button = NSButton(title: title.trimmed(to: 30), target: self, action: #selector(rowClicked(_:)))
             button.bezelStyle = .inline
             button.isBordered = false
             button.font = .systemFont(ofSize: 11)
@@ -110,23 +143,31 @@ final class LibraryPanel: NSView {
             button.toolTip = title
             button.identifier = NSUserInterfaceItemIdentifier(id)
 
+            let remove = NSButton(title: "✕", target: self, action: #selector(deleteClicked(_:)))
+            remove.bezelStyle = .inline
+            remove.isBordered = false
+            remove.font = .systemFont(ofSize: 10)
+            remove.contentTintColor = .tertiaryLabelColor
+            remove.toolTip = "Remove this document from the library"
+            remove.identifier = NSUserInterfaceItemIdentifier(id)
+
+            row.addArrangedSubview(button)
+            row.addArrangedSubview(remove)
+
             let detail = NSTextField(labelWithString: detailText(state: state, minutes: minutes))
             detail.font = .systemFont(ofSize: 9)
             detail.textColor = .tertiaryLabelColor
 
-            stack.addArrangedSubview(button)
+            stack.addArrangedSubview(row)
             stack.addArrangedSubview(detail)
         }
 
-        if documents.count > 12 {
-            let more = NSTextField(labelWithString: "+\(documents.count - 12) more in the app")
+        if filtered.count > 12 {
+            let more = NSTextField(labelWithString: "+\(filtered.count - 12) more in the app")
             more.font = .systemFont(ofSize: 9)
             more.textColor = .tertiaryLabelColor
             stack.addArrangedSubview(more)
         }
-
-        stack.leadingAnchor.constraint(equalTo: scrollView.contentView.leadingAnchor, constant: 2).isActive = true
-        stack.topAnchor.constraint(equalTo: scrollView.contentView.topAnchor, constant: 2).isActive = true
     }
 
     private func detailText(state: String, minutes: Int) -> String {
@@ -142,9 +183,18 @@ final class LibraryPanel: NSView {
         }
     }
 
+    // MARK: - Actions
+
     @objc private func rowClicked(_ sender: NSButton) {
         let id = sender.identifier?.rawValue ?? ""
         guard !id.isEmpty else { return }
         onOpen?(id)
+    }
+
+    @objc private func deleteClicked(_ sender: NSButton) {
+        let id = sender.identifier?.rawValue ?? ""
+        guard !id.isEmpty else { return }
+        let title = documents.first { ($0["doc_id"] as? String) == id }?["title"] as? String ?? "this document"
+        onDelete?(id, title)
     }
 }

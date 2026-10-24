@@ -61,8 +61,7 @@ struct SuiteConfig: Codable, Equatable {
             pollInterval: 5.0,
             openAtLogin: false,
             services: [
-                StackService(id: "read", label: "SlothRead", ports: [8300, 8100]),
-                StackService(id: "mode", label: "SlothMode", ports: [5173, 3001])
+                StackService(id: "read", label: "SlothRead", ports: [8300, 8100])
             ],
             apps: [
                 AppSpec(
@@ -75,17 +74,6 @@ struct SuiteConfig: Codable, Equatable {
                     apiBase: URL(string: "http://127.0.0.1:8100"),
                     libraryPath: "/api/documents",
                     service: "read"
-                ),
-                AppSpec(
-                    id: "mode",
-                    title: "SlothMode",
-                    tagline: "Gentle task planning",
-                    url: URL(string: "http://127.0.0.1:5173/")!,
-                    healthURL: URL(string: "http://127.0.0.1:3001/api/health")!,
-                    dotColorHex: "#5B5BD6",
-                    apiBase: URL(string: "http://127.0.0.1:3001"),
-                    libraryPath: nil,
-                    service: "mode"
                 )
             ]
         )
@@ -123,10 +111,34 @@ struct SuiteConfig: Codable, Equatable {
             var config = try JSONDecoder().decode(SuiteConfig.self, from: data)
             config.stackScript = PathTools.expandingTilde(config.stackScript)
             config.logDirectory = PathTools.expandingTilde(config.logDirectory)
-            return (config, nil)
+
+            let migrated = migrate(config)
+            if migrated != config {
+                if let encoded = try? JSONEncoder.pretty.encode(migrated) {
+                    try? encoded.write(to: url, options: .atomic)
+                }
+                Log.shared.write("config migrated: removed SlothMode entries")
+            }
+            return (migrated, nil)
         } catch {
             return (builtIn(), "Could not read \(url.path): \(error.localizedDescription) — using built-in defaults.")
         }
+    }
+
+    /// Bring an older config file up to date.
+    ///
+    /// SlothMode was removed from the suite, but a config file written
+    /// before that still listed it — the app would have kept offering an
+    /// app whose backend no longer exists.
+    static func migrate(_ config: SuiteConfig) -> SuiteConfig {
+        var updated = config
+        updated.apps = config.apps.filter { $0.id != "mode" }
+        updated.services = config.services.filter { $0.id != "mode" }
+        if updated.apps.isEmpty {
+            updated.apps = builtIn().apps
+            updated.services = builtIn().services
+        }
+        return updated
     }
 
     func service(id: String) -> StackService? {

@@ -1,23 +1,23 @@
 # Sloth Suite
 
-A single native macOS window that wraps two local AI apps:
+A single native macOS window that wraps a local AI app:
 
 | app | what it does | frontend | backend |
 |---|---|---|---|
 | **SlothRead** | turns papers and books into executive briefing decks | `http://127.0.0.1:8300` | `http://127.0.0.1:8100` |
-| **SlothMode** | gentle task planning | `http://127.0.0.1:5173` | `http://127.0.0.1:3001` |
 
-Both backends talk to a local Ollama daemon. The shell adds no cloud
-dependency of its own.
+The backend talks to a local Ollama daemon **or** to Apple's own on-device
+model. The shell adds no cloud dependency of its own.
 
 ---
 
 ## Requirements
 
-- macOS 13 or later
+- macOS 13 or later for the shell (macOS 26 for the Mac services helper)
 - Xcode command line tools (`xcode-select --install`) — the build uses `swiftc`
-- Node 18+ (for the two child apps)
+- Node 18+ (for the wrapped app)
 - Python 3.11+ (for the SlothRead backend)
+- Apple Silicon running macOS 26+ for the on-device model and the Mac voice
 
 ## Build and run
 
@@ -44,10 +44,16 @@ Sources/SlothSuite/
   StackManager.swift    process control, port probing, service restarts
   HealthMonitor.swift   health polling and status transitions
   Bridge.swift          the command bridge to the wrapped pages
-  Sidebar.swift         app list, actions and status read-outs
+  Sidebar.swift         app list, library, actions and status read-outs
   LibraryPanel.swift    native list of ingested documents
+  MacServices.swift     manages the bundled mac-service helper
+  CommandPalette.swift  the ⌘K palette
+  Exporter.swift        writes a briefing out as separate files
+  DropView.swift        drag-and-drop document import
   SuiteController.swift the window, webviews, supervisor and actions
   SelfTest.swift        assertion-based self-test
+Tools/
+  mac-service/          the Mac's own AI services (FoundationModels + AVSpeechSynthesizer)
 ```
 
 ### One webview per app
@@ -117,6 +123,59 @@ Logs land in `~/Library/Logs/SlothSuite/stack/`. The suite's own log is
 `~/Library/Logs/SlothSuite/slothsuite.log` (rotated at 1.5 MB, with the
 previous version kept as `slothsuite.log.1`). "Show logs" in the sidebar
 opens the folder.
+
+## The Mac services
+
+The suite bundles a small helper, `mac-service`, that exposes the Mac's own
+intelligence over a loopback HTTP API on `http://127.0.0.1:8199`:
+
+```
+GET  /mac/status   -> {"foundationModels":"available","speech":true,"model":"apple-foundation-models"}
+POST /mac/chat     -> {"system":…,"prompt":…,"json":true}  -> {"response": "…"}
+POST /mac/speak    -> {"text":…,"voice":"en-GB","rate":0.5} -> audio/wav
+```
+
+It is a **separate binary** because FoundationModels needs a macOS 26
+deployment target while the shell itself still supports older systems. The
+suite launches it on start and stops it on quit. If the SDK is missing, the
+build simply leaves it out and the suite falls back to Ollama and the
+browser's own voices.
+
+Two features are built on it:
+
+- **Mac as an AI provider.** The backend can summarise with Apple's on-device
+  model instead of Ollama. Pick it in the sidebar, or with
+  `POST /api/provider {"provider":"mac"}`. The choice is persisted on the
+  backend, so it survives a restart.
+- **The Mac's own voice.** The 60-second recaps are spoken by
+  `AVSpeechSynthesizer` — no API key, no payment, and nothing leaves the
+  machine. This replaced a direct browser call to the ElevenLabs cloud API,
+  which contradicted the app's own "no cloud egress" claims.
+
+## Quality-of-life
+
+| shortcut | what it does |
+|---|---|
+| ⌘K | command palette — switch app, import, export, speak, restart, toggle |
+| ⌘\\ | toggle the sidebar |
+| ⌘⇧D | copy a diagnostics bundle (versions, ports, health, log tail) to the clipboard |
+| ⌘O | add a book |
+| ⌘E | export as separate files |
+| ⌘R | reload the page |
+| ⌘1 | switch to the first app |
+
+- **Drag and drop** a PDF or EPUB onto the window to import it straight away.
+- **Library filtering** and a per-document delete button in the sidebar.
+- **The window remembers** which app you were using and reopens on it.
+- **The Dock badge** shows 🔊 while the Mac is speaking and 📋 when
+  diagnostics are copied.
+- **The error page** offers "Restart the stack", not just "Try again".
+
+## Export as separate files
+
+"Export as separate files…" writes a folder rather than one enormous
+Markdown file: an executive summary, one file per chapter, the audio scripts
+and the sources. Filenames are sanitised for the filesystem and kept unique.
 
 ## The command bridge
 

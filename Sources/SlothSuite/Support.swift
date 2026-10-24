@@ -38,7 +38,10 @@ enum PathTools {
         let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed == "~" { return NSHomeDirectory() }
         if trimmed.hasPrefix("~/") {
-            return NSHomeDirectory() + String(trimmed.dropFirst(2))
+            // The separator has to be re-added: dropping "~/" and
+            // concatenating straight onto the home directory produces
+            // "/Users/amreProjects/..." — a path that does not exist.
+            return NSHomeDirectory() + "/" + String(trimmed.dropFirst(2))
         }
         return trimmed
     }

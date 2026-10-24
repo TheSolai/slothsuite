@@ -104,20 +104,32 @@ final class SidebarView: NSVisualEffectView {
 
     enum SidebarAction {
         case addBook
-        case exportBriefing
+        case exportFiles
         case restartStack
         case reloadPage
         case showLogs
+        case copyDiagnostics
         case toggleWeb
+        case speak
+        case setProvider(String)
         case openDocument(String)
+        case deleteDocument(String, String)
     }
 
     private(set) var rows: [String: AppRow] = [:]
     private let stackLabel = NSTextField(labelWithString: "Stack: checking…")
     private let aiLabel = NSTextField(labelWithString: "Local AI: checking…")
     private let webLabel = NSTextField(labelWithString: "Web: checking…")
+    private let macLabel = NSTextField(labelWithString: "Mac model: checking…")
     private let webButton = NSButton(title: "Enable web lookups", target: nil, action: nil)
+    private let providerControl = NSSegmentedControl(
+        labels: ["Ollama", "Mac"],
+        trackingMode: .selectOne,
+        target: nil,
+        action: nil
+    )
     private let libraryPanel = LibraryPanel()
+    private let librarySearch = NSSearchField()
 
     private var selectedId: String?
     private var statuses: [String: HealthMonitor.Status] = [:]
@@ -139,9 +151,9 @@ final class SidebarView: NSVisualEffectView {
         titleLabel.font = .systemFont(ofSize: 16, weight: .bold)
 
         // The old tagline claimed "Local · private · offline". That is no
-        // longer true — the apps can look things up on the web — so the
-        // sidebar says what actually happens.
-        let subtitleLabel = NSTextField(labelWithString: "Local AI · web lookups optional")
+        // longer true — the apps can look things up on the web, and the Mac
+        // can speak — so the sidebar says what actually happens.
+        let subtitleLabel = NSTextField(labelWithString: "Local AI · optional web & voice")
         subtitleLabel.font = .systemFont(ofSize: 11)
         subtitleLabel.textColor = .secondaryLabelColor
 
@@ -166,21 +178,51 @@ final class SidebarView: NSVisualEffectView {
         root.addArrangedSubview(appStack)
         root.addArrangedSubview(Self.gap(12))
 
+        // AI provider — Ollama, or the Mac's own on-device model.
+        let providerHeading = NSTextField(labelWithString: "AI provider")
+        providerHeading.font = .systemFont(ofSize: 11, weight: .semibold)
+        providerHeading.textColor = .secondaryLabelColor
+        root.addArrangedSubview(providerHeading)
+
+        providerControl.segmentStyle = .rounded
+        providerControl.controlSize = .small
+        providerControl.target = self
+        providerControl.action = #selector(providerChanged)
+        providerControl.setEnabled(true, forSegment: 0)
+        providerControl.setEnabled(true, forSegment: 1)
+        providerControl.setEnabled(false, forSegment: 1)
+        providerControl.selectedSegment = 0
+        root.addArrangedSubview(providerControl)
+        root.addArrangedSubview(Self.gap(12))
+
         if specs.contains(where: { $0.supportsLibrary }) {
             let heading = NSTextField(labelWithString: "Library")
             heading.font = .systemFont(ofSize: 11, weight: .semibold)
             heading.textColor = .secondaryLabelColor
             root.addArrangedSubview(heading)
+
+            librarySearch.placeholderString = "Filter documents"
+            librarySearch.font = .systemFont(ofSize: 11)
+            librarySearch.controlSize = .small
+            librarySearch.target = self
+            librarySearch.action = #selector(librarySearchChanged)
+            librarySearch.sendsSearchStringImmediately = false
+            librarySearch.translatesAutoresizingMaskIntoConstraints = false
+            librarySearch.widthAnchor.constraint(equalToConstant: 210).isActive = true
+            root.addArrangedSubview(librarySearch)
+
             root.addArrangedSubview(libraryPanel)
             root.addArrangedSubview(Self.gap(12))
         }
 
         root.addArrangedSubview(makeButton("Add a book…", action: .addBook))
-        root.addArrangedSubview(makeButton("Export briefing…", action: .exportBriefing))
+        root.addArrangedSubview(makeButton("Export as separate files…", action: .exportFiles))
+        root.addArrangedSubview(makeButton("Speak the summary…", action: .speak))
         root.addArrangedSubview(Self.gap(10))
         root.addArrangedSubview(makeButton("Restart stack", action: .restartStack))
         root.addArrangedSubview(makeButton("Reload page", action: .reloadPage))
         root.addArrangedSubview(makeButton("Show logs", action: .showLogs))
+        root.addArrangedSubview(makeButton("Copy diagnostics", action: .copyDiagnostics))
         root.addArrangedSubview(Self.gap(8))
 
         webButton.bezelStyle = .rounded
@@ -191,7 +233,7 @@ final class SidebarView: NSVisualEffectView {
 
         root.addArrangedSubview(Self.gap(12))
 
-        for label in [stackLabel, aiLabel, webLabel] {
+        for label in [stackLabel, aiLabel, webLabel, macLabel] {
             label.font = .systemFont(ofSize: 11)
             label.textColor = .secondaryLabelColor
             root.addArrangedSubview(label)
@@ -199,7 +241,8 @@ final class SidebarView: NSVisualEffectView {
 
         root.addArrangedSubview(Self.gap(10))
         let footer = NSTextField(wrappingLabelWithString:
-            "Documents stay on this machine. Web lookups only send the search terms the model asks for.")
+            "Documents stay on this machine. Web lookups only send the search terms the model asks for. "
+            + "The Mac model and the Mac voice never leave the machine either.")
         footer.font = .systemFont(ofSize: 10)
         footer.textColor = .tertiaryLabelColor
         footer.lineBreakMode = .byWordWrapping
@@ -242,6 +285,15 @@ final class SidebarView: NSVisualEffectView {
         onAction?(.toggleWeb)
     }
 
+    @objc private func providerChanged() {
+        let value = providerControl.selectedSegment == 1 ? "mac" : "ollama"
+        onAction?(.setProvider(value))
+    }
+
+    @objc private func librarySearchChanged() {
+        libraryPanel.setFilter(librarySearch.stringValue)
+    }
+
     // MARK: - State
 
     func setSelected(id: String) {
@@ -275,6 +327,18 @@ final class SidebarView: NSVisualEffectView {
         webButton.title = enabled ? "Disable web lookups" : "Enable web lookups"
     }
 
+    func setMacModel(_ text: String) { macLabel.stringValue = text }
+
+    /// Reflect the provider the backend is actually using, and enable the
+    /// Mac option only when the on-device model is really available.
+    func setProvider(_ provider: String, macAvailable: Bool) {
+        providerControl.selectedSegment = (provider == "mac") ? 1 : 0
+        providerControl.setEnabled(macAvailable, forSegment: 1)
+        providerControl.toolTip = macAvailable
+            ? "Use Apple's on-device model instead of Ollama."
+            : "The Mac's on-device model is not available on this machine."
+    }
+
     func library() -> LibraryPanel { libraryPanel }
 }
 
@@ -283,23 +347,29 @@ enum SidebarActionTag {
     static func rawValue(for action: SidebarView.SidebarAction) -> Int {
         switch action {
         case .addBook: return 1
-        case .exportBriefing: return 2
+        case .exportFiles: return 2
         case .restartStack: return 3
         case .reloadPage: return 4
         case .showLogs: return 5
         case .toggleWeb: return 6
         case .openDocument: return 7
+        case .copyDiagnostics: return 8
+        case .speak: return 9
+        case .setProvider: return 10
+        case .deleteDocument: return 11
         }
     }
 
     static func action(for tag: Int) -> SidebarView.SidebarAction? {
         switch tag {
         case 1: return .addBook
-        case 2: return .exportBriefing
+        case 2: return .exportFiles
         case 3: return .restartStack
         case 4: return .reloadPage
         case 5: return .showLogs
         case 6: return .toggleWeb
+        case 8: return .copyDiagnostics
+        case 9: return .speak
         default: return nil
         }
     }
