@@ -93,6 +93,90 @@ Google Docs, carries that exact string as its title. Generic titles are now
 treated as no title at all, and the real title is taken from the document's
 own opening lines — skipping the address block a letter opens with.
 
+## Phase 5 — colour, and the notes that never saved
+
+The brief was *"looking good! maybe a bit more colour, like the old one but no
+weird fonts, and notes didnt work."* Two things in it.
+
+### More colour, without the weird fonts
+
+The old web app's palette came across — the violet-blue wordmark, cyan
+highlights, the green "private on your machine", the gold "no key needed",
+the rose warnings, the blue links — but tuned for a light native window. Neon
+on dark does not survive the move to a light background, so the same hues are
+there at a weight that can be read.
+
+The fonts did not change: everything is still the system sans.
+
+Every colour now means something rather than just being there: the sidebar's
+module icons, the library's filters and file-type badges, the reader's
+headings and chips, the status dots, the notes selection, the audio chapter
+numbers. They all come from one file, `Palette.swift`, so the look of the
+whole suite is one edit.
+
+**`contentTintColor` tints a button's image, not its title.** Every coloured
+button title was grey until it was given an *attributed* title — with the
+font in the attributes too, or the title quietly falls back to 13-point
+system type.
+
+### The thesis rule was never painted
+
+The reader rules the pull quote with a hairline in the margin. It was drawn
+correctly and never appeared, because **NSTextView clips anything drawn to the
+left of its text container** — and the rule was 9 points to the left of it.
+Moving the rule inside the container's indent put it exactly where the design
+wanted it, and it now paints.
+
+### The notes module: a note you typed could be lost
+
+*"Notes didnt work."* The notes code path turned out to work — create, list,
+edit, save — but only when the store was poked directly. Driving the real
+controls found three things:
+
+1. **The auto-save could never fire.** The debounce was a `Timer` on the main
+   run loop. A main thread that is busy — fetching a briefing, uploading a
+   document — starves that timer, and the note sat unsaved. The debounce now
+   waits on a background queue, and the store writes on its own queue too, so
+   a typed note reaches the disk whatever else the app is doing. The old check
+   called `flushPendingSave()` directly and therefore never exercised the
+   timer at all; the new one types through the editor's own insertion path and
+   waits for the note to appear **in the file**.
+2. **"New Note" could be swallowed.** The view adopted any empty note it
+   could find, so an old note that was never written in swallowed the request:
+   the same empty note opened again and the button looked dead. It now only
+   adopts a note made *for this request*.
+3. **A search filter could hide the note you had just made.** The filter is
+   cleared when a new note starts.
+
+Quitting also flushes the editor, and the store's file is written before the
+app goes, so the last words typed are not the first words lost.
+
+### A failed snapshot left the app running
+
+`--snapshot` returned without exiting when it could not find the window to
+render, so a failed render left a stray copy of the suite running — holding
+the learning store open and uploading its own fixture into the library. Four
+duplicates of the test book were in the library because of it. The snapshot
+path now always stops, and has a thirty-second watchdog.
+
+### The Mac helper asked the model questions all at once
+
+The on-device model is a single resource, and the helper was letting every
+request run against it at the same time. Two questions at once make both of
+them slow — the second can take twice as long as the first — and neither is
+worth the wait. The helper now gives the model **one question at a time**.
+
+It also **loads the model when it starts**, so the first question does not
+pay for the load. And the gate's `mac.chat` check now asks a plain question
+("Say hello.") instead of demanding JSON: the model's own safety classifier
+rejects a prompt that asks for JSON and nothing else — it reads like an
+attempt to force the output — and the check was failing for a reason that had
+nothing to do with the model being there.
+
+**The model is slow on this Mac: about 45 seconds for "Hello!"** The backend
+allows 180 seconds, so the Mac provider works; it is just not quick. The
+gate's budget is now 240 seconds to match.
+
 ## Phase 3 — the third ten: a learning desk, not a shell
 
 The brief was a redesign: functional buttons, a real library, and the old
@@ -209,6 +293,15 @@ Building the gate found four real defects that had been invisible:
 
 ## Still open
 
+- The **on-device model is slow** — about 45 seconds for a two-word answer on
+  this Mac, and longer when the model is cold. The Mac provider works and the
+  backend's 180-second budget covers it, but a briefing takes minutes rather
+  than seconds. Ollama is the faster provider; the Mac one is the private one.
+- The **Mac helper can still wedge** after hours of use: `/mac/status` says
+  "available" while `/mac/chat` never returns. Killing the helper and letting
+  the suite start a fresh one fixes it. The suite should notice a silent
+  helper and restart it rather than leaving the user with a Mac provider that
+  never replies.
 - The on-device model is slower than Ollama on a long chapter. The provider
   fallback chain handles it, but the Mac provider is best suited to short
   passages.
@@ -220,17 +313,23 @@ Building the gate found four real defects that had been invisible:
 
 ## Verified
 
-The gate (`./build.sh test`) is green at **28/28**, exit 0:
+The gate (`./build.sh test`) is green at **35/35**, exit 0:
 
 ```
 config.apps, config.services, stack.script, stack.ports.read,
 health.read, webview.attached, page.ready, webview.url, webview.title,
 bridge.status, library.documents, module.library, module.reader,
 module.notes, module.app, learning.note, learning.favourite,
-learning.read, learning.cleanup, briefing.fetch, web.endpoint.read,
-provider.endpoint, mac.service, mac.chat, mac.speak, selftest.fixture,
-filepicker.fired, upload.pipeline
+learning.read, learning.cleanup, notes.button, notes.create, notes.list,
+notes.editor, notes.autosave, notes.survive, notes.cleanup, briefing.fetch,
+web.endpoint.read, provider.endpoint, mac.service, mac.chat, mac.speak,
+selftest.fixture, filepicker.fired, upload.pipeline
 ```
+
+The six `notes.*` checks are the end-to-end ones: the real **New Note**
+button, the real insertion path, and a wait for the note to appear **in the
+file on disk** — not just in the store in memory. They are the checks that
+found the auto-save that could never fire.
 
 The gate cleans up after itself: the document it uploads is deleted again
 before the run ends, so a gate that runs on every build does not leave a

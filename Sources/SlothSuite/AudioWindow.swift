@@ -79,6 +79,9 @@ final class AudioWindowController {
         playAllButton.font = Typography.body(weight: .medium)
         playAllButton.image = NSImage(systemSymbolName: "speaker.wave.2.fill", accessibilityDescription: nil)
         playAllButton.imagePosition = .imageLeading
+        playAllButton.contentTintColor = Palette.accent
+        playAllButton.setColoredTitle("Play everything", color: Palette.accent,
+                                      font: Typography.body(weight: .medium))
         playAllButton.imageHugsTitle = true
 
         stopButton.target = self
@@ -194,11 +197,11 @@ final class AudioWindowController {
 
         let number = NSTextField(labelWithString: "\(index + 1)")
         number.font = Typography.caption(weight: .bold)
-        number.textColor = .secondaryLabelColor
+        number.textColor = Palette.accent
         number.alignment = .center
         number.wantsLayer = true
         number.layer?.cornerRadius = 9
-        number.layer?.backgroundColor = NSColor.controlAccentColor.withAlphaComponent(0.16).cgColor
+        number.layer?.backgroundColor = Palette.wash(Palette.accent, amount: 0.16).cgColor
         number.translatesAutoresizingMaskIntoConstraints = false
 
         let name = NSTextField(labelWithString: chapter.title)
@@ -207,7 +210,7 @@ final class AudioWindowController {
 
         let pages = NSTextField(labelWithString: chapter.pageRange)
         pages.font = Typography.caption()
-        pages.textColor = .tertiaryLabelColor
+        pages.textColor = Palette.teal
 
         let playButton = NSButton(title: "Play", target: self, action: #selector(playChapter(_:)))
         playButton.bezelStyle = .rounded
@@ -215,6 +218,9 @@ final class AudioWindowController {
         playButton.font = Typography.body(weight: .medium)
         playButton.image = NSImage(systemSymbolName: "speaker.wave.2", accessibilityDescription: nil)
         playButton.imagePosition = .imageLeading
+        playButton.contentTintColor = Palette.accent
+        playButton.setColoredTitle("Play", color: Palette.accent,
+                                   font: Typography.body(weight: .medium))
         playButton.imageHugsTitle = true
         playButton.tag = index
         playButton.setContentHuggingPriority(.required, for: .horizontal)

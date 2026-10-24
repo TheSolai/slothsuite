@@ -61,6 +61,23 @@ final class LearningStore {
 
     private(set) var state = LearningState()
 
+    /// Guards the state.
+    ///
+    /// The store is written from a background queue — a note has to reach
+    /// the disk even while the main thread is busy — so the state it guards
+    /// can be touched from two threads at once.
+    private let lock = NSLock()
+
+    /// The queue the file is written on.
+    ///
+    /// Writes are serialised, so the file is never half-written, and they do
+    /// not run on the main thread, so a write cannot stutter the typing that
+    /// caused it.
+    private let writer = DispatchQueue(label: "com.amre.slothsuite.learning.write", qos: .utility)
+
+    /// The write that has not happened yet, if a newer one has replaced it.
+    private var pendingWrite: DispatchWorkItem?
+
     private var fileURL: URL {
         PathTools.applicationSupportDirectory().appendingPathComponent("learning.json")
     }
@@ -82,9 +99,45 @@ final class LearningStore {
     }
 
     /// Write the state to disk. Called after every mutation.
-    @discardableResult
-    func save() -> Bool {
-        guard let data = try? JSONEncoder.pretty.encode(state) else { return false }
+    ///
+    /// The write happens on a background queue, and a burst of changes
+    /// collapses into one write: the newest state wins, and the file on disk
+    /// is always the state the user last saw. Writing on the main thread
+    /// instead would mean a keystroke waits for the disk.
+    func save() {
+        lock.lock()
+        let snapshot = state
+        pendingWrite?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            _ = self?.write(snapshot)
+        }
+        pendingWrite = work
+        lock.unlock()
+
+        writer.async(execute: work)
+    }
+
+    /// Write the state to disk right now, on this thread.
+    ///
+    /// The ordinary save is asynchronous, which is right for typing and
+    /// wrong for quitting: an app that is on its way out has to leave the
+    /// file complete before it goes. A write that is already on its way is
+    /// waited out first, so the file cannot end up holding older state than
+    /// the one being written now.
+    func saveNow() {
+        lock.lock()
+        pendingWrite?.cancel()
+        pendingWrite = nil
+        let snapshot = state
+        lock.unlock()
+
+        writer.sync {}
+        _ = write(snapshot)
+    }
+
+    /// Write a snapshot to disk. Runs on the writer queue.
+    private func write(_ snapshot: LearningState) -> Bool {
+        guard let data = try? JSONEncoder.pretty.encode(snapshot) else { return false }
         do {
             try FileManager.default.createDirectory(
                 at: fileURL.deletingLastPathComponent(),
@@ -100,20 +153,50 @@ final class LearningStore {
 
     private func commit() {
         save()
-        onChange?()
+        notifyChange()
+    }
+
+    /// Tell the interface that something changed.
+    ///
+    /// The interface belongs to the main thread, so the news is delivered
+    /// there even when the change happened somewhere else.
+    private func notifyChange() {
+        let handler = onChange
+        guard let handler else { return }
+        if Thread.isMainThread {
+            handler()
+        } else {
+            DispatchQueue.main.async(execute: handler)
+        }
+    }
+
+    /// Read the state under the lock.
+    private func withState<T>(_ body: (LearningState) -> T) -> T {
+        lock.lock()
+        defer { lock.unlock() }
+        return body(state)
+    }
+
+    /// Change the state under the lock.
+    private func mutate<T>(_ body: (inout LearningState) -> T) -> T {
+        lock.lock()
+        defer { lock.unlock() }
+        return body(&state)
     }
 
     // MARK: Favourites
 
     func isFavourite(documentId: String) -> Bool {
-        state.favourites.contains(documentId)
+        withState { $0.favourites.contains(documentId) }
     }
 
     func toggleFavourite(documentId: String) {
-        if state.favourites.contains(documentId) {
-            state.favourites.remove(documentId)
-        } else {
-            state.favourites.insert(documentId)
+        mutate { state in
+            if state.favourites.contains(documentId) {
+                state.favourites.remove(documentId)
+            } else {
+                state.favourites.insert(documentId)
+            }
         }
         commit()
     }
@@ -121,45 +204,55 @@ final class LearningStore {
     // MARK: Read state
 
     func isRead(documentId: String) -> Bool {
-        state.read.contains(documentId)
+        withState { $0.read.contains(documentId) }
     }
 
     func toggleRead(documentId: String) {
-        if state.read.contains(documentId) {
-            state.read.remove(documentId)
-        } else {
-            state.read.insert(documentId)
+        mutate { state in
+            if state.read.contains(documentId) {
+                state.read.remove(documentId)
+            } else {
+                state.read.insert(documentId)
+            }
         }
         commit()
     }
 
     var unreadCount: Int {
-        state.read.count
+        withState { $0.read.count }
     }
 
     // MARK: Continue reading
 
     func markReading(documentId: String, chapter: Int = 0) {
-        state.lastReadDocumentId = documentId
-        state.lastReadChapter = chapter
+        mutate { state in
+            state.lastReadDocumentId = documentId
+            state.lastReadChapter = chapter
+        }
         commit()
     }
 
-    var lastReadDocumentId: String? { state.lastReadDocumentId }
+    var lastReadDocumentId: String? { withState { $0.lastReadDocumentId } }
 
     // MARK: Notes
 
     func notes(for documentId: String) -> [StudyNote] {
-        state.notes.filter { $0.documentId == documentId }
-            .sorted { $0.updatedAt > $1.updatedAt }
+        withState { state in
+            state.notes.filter { $0.documentId == documentId }
+                .sorted { $0.updatedAt > $1.updatedAt }
+        }
     }
 
     var allNotes: [StudyNote] {
-        state.notes.sorted { $0.updatedAt > $1.updatedAt }
+        withState { state in
+            state.notes.sorted { $0.updatedAt > $1.updatedAt }
+        }
     }
 
     func note(id: String) -> StudyNote? {
-        state.notes.first { $0.id == id }
+        withState { state in
+            state.notes.first { $0.id == id }
+        }
     }
 
     /// Create a note, optionally anchored to a document.
@@ -174,20 +267,24 @@ final class LearningStore {
             createdAt: now,
             updatedAt: now
         )
-        state.notes.append(note)
+        mutate { $0.notes.append(note) }
         commit()
         return note
     }
 
     func updateNote(id: String, body: String) {
-        guard let index = state.notes.firstIndex(where: { $0.id == id }) else { return }
-        state.notes[index].body = body
-        state.notes[index].updatedAt = Date()
+        let changed = mutate { state -> Bool in
+            guard let index = state.notes.firstIndex(where: { $0.id == id }) else { return false }
+            state.notes[index].body = body
+            state.notes[index].updatedAt = Date()
+            return true
+        }
+        guard changed else { return }
         commit()
     }
 
     func deleteNote(id: String) {
-        state.notes.removeAll { $0.id == id }
+        mutate { $0.notes.removeAll { $0.id == id } }
         commit()
     }
 
@@ -205,7 +302,7 @@ final class LearningStore {
             }
         }
 
-        for note in state.notes {
+        for note in withState({ $0.notes }) {
             let haystack = "\(note.documentTitle) \(note.body)".lowercased()
             if haystack.contains(needle) {
                 results.append("Note — \(note.summaryLine)")

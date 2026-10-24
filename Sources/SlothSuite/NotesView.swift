@@ -73,11 +73,17 @@ final class NotesView: NSView, NSTableViewDataSource, NSTableViewDelegate, NSTex
     /// The note the editor is writing into, if any.
     private var currentNoteId: String?
 
-    /// When the user last asked for a brand-new note.
+    /// When the user last asked for a brand-new note, and which notes already
+    /// existed at that moment.
     ///
     /// The controller may answer that request by making the note itself; this
     /// is how we recognise a note it has just made.
-    private var newNoteRequestedAt: Date?
+    ///
+    /// The list of ids matters as much as the date. Without it the view adopts
+    /// *any* empty note it can find, so an old note that was never written
+    /// in swallows the request: the user presses "New Note", the same empty
+    /// note opens again, and it looks like the button does nothing.
+    private var newNoteRequest: (asked: Date, existing: Set<String>)?
 
     /// The body the store currently holds for `currentNoteId`.
     ///
@@ -86,7 +92,13 @@ final class NotesView: NSView, NSTableViewDataSource, NSTableViewDelegate, NSTex
     private var lastKnownBody = ""
 
     /// The debounced auto-save.
-    private var saveTimer: Timer?
+    ///
+    /// The delay runs on a background queue, not on the main run loop. The
+    /// main thread can be busy for a long time — fetching a briefing,
+    /// uploading a document — and a timer that lives there waits for it. A
+    /// note the user has already typed is a note that should be on disk,
+    /// whatever else the app is doing.
+    private var saveWork: DispatchWorkItem?
 
     /// Set while the table selection is changed by us, so that the change
     /// notification does not look like the user clicking a row.
@@ -123,9 +135,9 @@ final class NotesView: NSView, NSTableViewDataSource, NSTableViewDelegate, NSTex
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     deinit {
-        // The timer holds the run loop, not us, but leaving it running would
-        // keep firing into a view that no longer exists.
-        saveTimer?.invalidate()
+        // The work item holds the run loop, not us, but leaving it running
+        // would keep firing into a view that no longer exists.
+        saveWork?.cancel()
     }
 
     private func buildListPane() {
@@ -147,6 +159,10 @@ final class NotesView: NSView, NSTableViewDataSource, NSTableViewDelegate, NSTex
         newNoteButton.action = #selector(newNotePressed)
         newNoteButton.toolTip = "Start a new note"
         newNoteButton.setAccessibilityLabel("New note")
+        // The notes module's own colour, on its one action.
+        newNoteButton.contentTintColor = Palette.green
+        newNoteButton.setColoredTitle("New Note", color: Palette.green,
+                                      font: .systemFont(ofSize: 11))
         handOverToAutoLayout(newNoteButton)
 
         searchField.placeholderString = "Search notes"
@@ -191,7 +207,7 @@ final class NotesView: NSView, NSTableViewDataSource, NSTableViewDelegate, NSTex
 
         let emptyIcon = NSImageView()
         emptyIcon.image = NSImage(systemSymbolName: "note.text", accessibilityDescription: nil)
-        emptyIcon.contentTintColor = .tertiaryLabelColor
+        emptyIcon.contentTintColor = Palette.accent.withAlphaComponent(0.45)
         emptyIcon.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 32, weight: .light)
         emptyIcon.translatesAutoresizingMaskIntoConstraints = false
 
@@ -269,6 +285,9 @@ final class NotesView: NSView, NSTableViewDataSource, NSTableViewDelegate, NSTex
         openDocumentButton.action = #selector(openDocumentPressed)
         openDocumentButton.toolTip = "Open the document this note belongs to"
         openDocumentButton.setAccessibilityLabel("Open document")
+        openDocumentButton.contentTintColor = Palette.blue
+        openDocumentButton.setColoredTitle("Open document", color: Palette.blue,
+                                           font: .systemFont(ofSize: 11))
         handOverToAutoLayout(openDocumentButton)
 
         // A plain text editor: the note is the user's own words, so it stays
@@ -313,7 +332,7 @@ final class NotesView: NSView, NSTableViewDataSource, NSTableViewDelegate, NSTex
 
         let placeholderIcon = NSImageView()
         placeholderIcon.image = NSImage(systemSymbolName: "square.and.pencil", accessibilityDescription: nil)
-        placeholderIcon.contentTintColor = .tertiaryLabelColor
+        placeholderIcon.contentTintColor = Palette.accent.withAlphaComponent(0.45)
         placeholderIcon.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 30, weight: .light)
         placeholderIcon.translatesAutoresizingMaskIntoConstraints = false
 
@@ -391,6 +410,50 @@ final class NotesView: NSView, NSTableViewDataSource, NSTableViewDelegate, NSTex
         editorPane.trailingAnchor.constraint(equalTo: trailingAnchor).isActive = true
         editorPane.topAnchor.constraint(equalTo: topAnchor).isActive = true
         editorPane.bottomAnchor.constraint(equalTo: bottomAnchor).isActive = true
+    }
+
+    // MARK: - Test hooks
+
+    /// The notes the list is showing right now.
+    var visibleNotesForTest: [StudyNote] { notes }
+
+    /// The note the editor is showing right now.
+    var editingNoteIdForTest: String? { currentNoteId }
+
+    /// What the editor contains right now.
+    var editorTextForTest: String { textView.string }
+
+    /// Is the editor showing, rather than the "no note open" placeholder?
+    var editorIsVisibleForTest: Bool { !editorScrollView.isHidden }
+
+    /// Press the "New Note" button, exactly as the user does.
+    func pressNewNoteForTest() {
+        newNotePressed()
+    }
+
+    /// Press the real button, through the real control, the way a click does.
+    ///
+    /// Calling the action directly skips the button itself, so it proves less
+    /// than a click does: a button that is disabled, hidden or wired to the
+    /// wrong action still passes a direct call.
+    func clickNewNoteButtonForTest() {
+        newNoteButton.performClick(nil)
+    }
+
+    /// Is the "New Note" button actually pressable?
+    var newNoteButtonIsEnabledForTest: Bool {
+        newNoteButton.isEnabled && !newNoteButton.isHidden
+    }
+
+    /// Type into the editor the way the keyboard does.
+    ///
+    /// This goes through `insertText`, so the text view's own change
+    /// notification fires — the same path a real keystroke takes. The
+    /// alternative, setting the string directly, proves nothing about the
+    /// wiring between the editor and the store.
+    func typeIntoEditorForTest(_ text: String) {
+        textView.insertText(text, replacementRange: NSRange(location: textView.string.utf16.count,
+                                                              length: 0))
     }
 
     // MARK: - Public API
@@ -472,6 +535,10 @@ final class NotesView: NSView, NSTableViewDataSource, NSTableViewDelegate, NSTex
         // The note we are leaving gets its last word in first.
         flushPendingSave()
 
+        // A search filter set for the notes that were already here would
+        // hide the note the user has just asked for, so the filter goes.
+        clearSearchFilter()
+
         let note = adoptFreshNote() ?? LearningStore.shared.addNote()
 
         currentNoteId = note.id
@@ -487,11 +554,14 @@ final class NotesView: NSView, NSTableViewDataSource, NSTableViewDelegate, NSTex
     /// The note the controller has just made for us, if there is one.
     ///
     /// A note with no words in it, made after the user asked for a new one,
-    /// is the note they meant.
+    /// is the note they meant — as long as it is not one of the notes that
+    /// were already there when they asked.
     private func adoptFreshNote() -> StudyNote? {
-        guard let asked = newNoteRequestedAt else { return nil }
+        guard let request = newNoteRequest else { return nil }
         return LearningStore.shared.allNotes.first { note in
-            note.body.isEmpty && note.createdAt >= asked
+            note.body.isEmpty
+                && note.createdAt >= request.asked
+                && !request.existing.contains(note.id)
         }
     }
 
@@ -512,21 +582,27 @@ final class NotesView: NSView, NSTableViewDataSource, NSTableViewDelegate, NSTex
     /// hit the disk on every keystroke would be a note that hit the disk very
     /// hard.
     private func scheduleSave() {
-        saveTimer?.invalidate()
-        let timer = Timer.scheduledTimer(withTimeInterval: Self.saveDebounce, repeats: false) { [weak self] _ in
-            self?.saveTimer = nil
-            self?.flushPendingSave()
+        saveWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            // The editor and the store belong to the main thread, so the
+            // last step happens there. Only the waiting happens elsewhere.
+            DispatchQueue.main.async { [weak self] in
+                self?.flushPendingSave()
+            }
         }
-        saveTimer = timer
-        // Run in common modes so a save still happens while a menu is open
-        // or the user is scrolling.
-        RunLoop.main.add(timer, forMode: .common)
+        saveWork = work
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + Self.saveDebounce,
+                                                       execute: work)
     }
 
     /// Save right now, if there is anything to save.
-    private func flushPendingSave() {
-        saveTimer?.invalidate()
-        saveTimer = nil
+    ///
+    /// The controller calls this when the user leaves the module and when the
+    /// app quits. The auto-save is debounced, so without those two calls the
+    /// last half-second of typing can be lost.
+    func flushPendingSave() {
+        saveWork?.cancel()
+        saveWork = nil
 
         guard let id = currentNoteId else { return }
         let body = textView.string
@@ -544,7 +620,10 @@ final class NotesView: NSView, NSTableViewDataSource, NSTableViewDelegate, NSTex
     /// not, we begin one here, so the button is never a dead end.
     @objc private func newNotePressed() {
         let previous = currentNoteId
-        newNoteRequestedAt = Date()
+        // Remember what was already there, so the note the controller makes
+        // can be told apart from an old empty note that happens to match.
+        newNoteRequest = (asked: Date(),
+                          existing: Set(LearningStore.shared.allNotes.map(\.id)))
 
         onCreateNote?()
 
@@ -560,6 +639,14 @@ final class NotesView: NSView, NSTableViewDataSource, NSTableViewDelegate, NSTex
 
     @objc private func searchChanged() {
         onSearch?(searchField.stringValue)
+    }
+
+    /// Drop the search filter and tell the controller to show everything
+    /// again.
+    private func clearSearchFilter() {
+        guard !searchField.stringValue.isEmpty else { return }
+        searchField.stringValue = ""
+        onSearch?("")
     }
 
     /// The search field is a filter, so it filters as you type. The action
@@ -900,7 +987,7 @@ final class NoteRowView: NSTableCellView {
 
     private func updateSelectionAppearance() {
         selectionBackground.layer?.backgroundColor = isRowSelected
-            ? NSColor.controlAccentColor.withAlphaComponent(0.18).cgColor
+            ? Palette.wash(Palette.accent, amount: 0.16).cgColor
             : NSColor.clear.cgColor
     }
 

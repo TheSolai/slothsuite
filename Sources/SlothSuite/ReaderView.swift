@@ -130,11 +130,17 @@ final class ReaderView: NSView {
 
         let listen = actionButton("Listen", symbol: "speaker.wave.2", action: #selector(listenPressed))
         listenButton = listen
+        listen.contentTintColor = Palette.teal
+        listen.setColoredTitle("Listen", color: Palette.teal, font: Typography.body(weight: .medium))
         // The two the brief asked for: everything as audio, and the pop-out
         // window that holds every chapter and its script on one page.
         let playAll = actionButton("All audio", symbol: "speaker.wave.3", action: #selector(playAllPressed))
         playAllButton = playAll
+        playAll.contentTintColor = Palette.accent
+        playAll.setColoredTitle("All audio", color: Palette.accent, font: Typography.body(weight: .medium))
         let chapters = actionButton("Chapters", symbol: "list.bullet.rectangle", action: #selector(chaptersPressed))
+        chapters.contentTintColor = Palette.accent
+        chapters.setColoredTitle("Chapters", color: Palette.accent, font: Typography.body(weight: .medium))
         let note = actionButton("Add Note", symbol: "note.text.badge.plus", action: #selector(addNotePressed))
         let open = actionButton("Open in App", symbol: "safari", action: #selector(openInAppPressed))
         let export = actionButton("Export", symbol: "square.and.arrow.up", action: #selector(exportPressed))
@@ -325,6 +331,10 @@ final class ReaderView: NSView {
         let built = BriefingTextBuilder.build(briefing)
         textView.textStorage?.setAttributedString(built.string)
         textView.ruleRange = built.thesisRange
+        // The rule is drawn in the margin, to the left of the text. A change
+        // to the text only marks the text itself as dirty, so the rule would
+        // never be painted without this.
+        textView.needsDisplay = true
         chapterRanges = built.chapterRanges
 
         currentChapter = 0
@@ -390,15 +400,16 @@ final class ReaderView: NSView {
 
         var chips: [ReaderChip] = []
         let chapters = briefing.chapters.count
-        chips.append(ReaderChip(text: "\(chapters) chapter\(chapters == 1 ? "" : "s")"))
+        chips.append(ReaderChip(text: "\(chapters) chapter\(chapters == 1 ? "" : "s")", colour: Palette.teal))
         if briefing.totalWords > 0 {
-            chips.append(ReaderChip(text: "\(Self.grouped(briefing.totalWords)) words"))
+            chips.append(ReaderChip(text: "\(Self.grouped(briefing.totalWords)) words", colour: Palette.blue))
         }
         if briefing.timeSavedMinutes > 0 {
-            chips.append(ReaderChip(text: "\(briefing.timeSavedMinutes) min saved"))
+            chips.append(ReaderChip(text: "\(briefing.timeSavedMinutes) min saved", colour: Palette.gold))
         }
         if briefing.standardReadingMinutes > 0 {
-            chips.append(ReaderChip(text: "\(Self.readingTime(briefing.standardReadingMinutes)) read"))
+            chips.append(ReaderChip(text: "\(Self.readingTime(briefing.standardReadingMinutes)) read",
+                                    colour: Palette.accent))
         }
 
         for chip in chips {
@@ -653,14 +664,18 @@ private final class ReaderTextView: NSTextView {
         let containerRect = manager.boundingRect(forGlyphRange: glyphRange, in: container)
         guard containerRect.height > 0 else { return }
 
-        // The container lives inside the text view's inset, so its rect is
-        // that much further down and to the right.
-        let viewRect = containerRect.offsetBy(dx: textContainerInset.width, dy: textContainerInset.height)
-        let rule = NSRect(x: viewRect.minX - 14, y: viewRect.minY + 2, width: 3, height: max(0, viewRect.height - 4))
+        // The rule lives in the thesis paragraph's indent, which is *inside*
+        // the text container. Anything drawn to the left of the container is
+        // clipped away by NSTextView, so the offset is measured from the
+        // container's own left edge — not from the text view's.
+        let rule = NSRect(x: textContainerInset.width + 9,
+                          y: containerRect.minY + textContainerInset.height,
+                          width: 3,
+                          height: containerRect.height)
         guard rule.intersects(dirtyRect) else { return }
 
         let path = NSBezierPath(roundedRect: rule, xRadius: 1.5, yRadius: 1.5)
-        NSColor.controlAccentColor.setFill()
+        Palette.accent.setFill()
         path.fill()
     }
 
@@ -755,7 +770,7 @@ private final class ChapterPill: NSButton {
         let colour: NSColor
         if isChosen {
             // A filled pill, the way macOS marks the current row.
-            layer?.backgroundColor = NSColor.controlAccentColor.withAlphaComponent(0.20).cgColor
+            layer?.backgroundColor = Palette.wash(Palette.accent, amount: 0.18).cgColor
             colour = .labelColor
         } else if isHovering {
             layer?.backgroundColor = NSColor.labelColor.withAlphaComponent(0.07).cgColor
@@ -780,7 +795,12 @@ private final class ReaderChip: NSView {
 
     private let label = NSTextField(labelWithString: "")
 
-    init(text: String) {
+    /// The colour the chip wears. Each kind of fact gets its own colour, so
+    /// the row of chips under the title reads at a glance.
+    private let colour: NSColor
+
+    init(text: String, colour: NSColor = Palette.teal) {
+        self.colour = colour
 
         // Auto Layout positions these, so the autoresizing mask must not
         // fight it — a view with the mask on keeps its old frame and is
@@ -792,10 +812,10 @@ private final class ReaderChip: NSView {
 
         wantsLayer = true
         layer?.cornerRadius = 5
-        layer?.backgroundColor = NSColor.labelColor.withAlphaComponent(0.06).cgColor
+        layer?.backgroundColor = Palette.wash(colour, amount: 0.12).cgColor
 
         label.font = .systemFont(ofSize: 10, weight: .medium)
-        label.textColor = .secondaryLabelColor
+        label.textColor = colour
         label.alignment = .center
         label.stringValue = text
 
@@ -894,11 +914,11 @@ private final class BriefingTextBuilder {
     }
 
     private func heading(_ title: String) {
-        append(title.uppercased(), font: Self.headingFont, colour: .tertiaryLabelColor, style: Self.headingStyle())
+        append(title.uppercased(), font: Self.headingFont, colour: Palette.accent, style: Self.headingStyle())
     }
 
     private func subheading(_ title: String) {
-        append(title.uppercased(), font: Self.subheadingFont, colour: .tertiaryLabelColor, style: Self.subheadingStyle())
+        append(title.uppercased(), font: Self.subheadingFont, colour: Palette.teal, style: Self.subheadingStyle())
     }
 
     private func paragraph(_ body: String) {
@@ -912,7 +932,7 @@ private final class BriefingTextBuilder {
 
     private func chapterHeading(number: Int, title: String, pageRange: String) -> NSRange {
         let heading = "Chapter \(number) — \(title)".uppercased()
-        let range = append(heading, font: Self.headingFont, colour: .tertiaryLabelColor,
+        let range = append(heading, font: Self.headingFont, colour: Palette.accent,
                            style: Self.headingStyle(), endsParagraph: false)
         let caption = Self.pageRange(pageRange)
         if !caption.isEmpty {

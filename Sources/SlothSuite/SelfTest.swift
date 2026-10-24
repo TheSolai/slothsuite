@@ -22,6 +22,13 @@ final class SelfTestRunner {
     /// anything, so the test can take its own litter away again.
     private var libraryIdsBeforeUpload: Set<String> = []
 
+    /// The note the notes check is in the middle of proving.
+    ///
+    /// The notes auto-save is debounced, so the check that matters — "the
+    /// words reach the disk by themselves" — cannot run in the same breath as
+    /// the typing. It is finished a moment later.
+    private var pendingNotesCheck: (id: String, body: String, before: Set<String>)?
+
     init(controller: SuiteController) {
         self.controller = controller
     }
@@ -198,6 +205,7 @@ final class SelfTestRunner {
         // 8. The native modules must switch cleanly, and the suite's own
         //    learning store must survive a round trip.
         checkLearningModules()
+        checkNotesModule()
         checkBriefing()
 
         // 9. The web-tools endpoints must exist. A 404 means the backend has
@@ -278,6 +286,122 @@ final class SelfTestRunner {
         check("learning.cleanup", learning.note(id: note.id) == nil, "note removed")
     }
 
+    /// The notes module must work the way the user works it: press "New
+    /// Note", see the note appear in the list, type into it, and have the
+    /// words reach the disk.
+    ///
+    /// The store can be perfectly healthy while the module is broken — a
+    /// button that creates a note nobody ever sees, or an editor that never
+    /// saves — so this drives the real view rather than the store.
+    private func checkNotesModule() {
+        let notes = controller.notesViewForTest
+        let learning = LearningStore.shared
+
+        let before = Set(learning.allNotes.map(\.id))
+
+        // 1. The button itself has to be pressable. Calling the action
+        //    directly would pass even if the button were disabled or hidden.
+        check("notes.button", notes.newNoteButtonIsEnabledForTest, "New Note is enabled")
+
+        // 2. Press the real button, through the real control.
+        notes.clickNewNoteButtonForTest()
+
+        guard let editingId = notes.editingNoteIdForTest else {
+            check("notes.create", false, "no note is being edited after pressing New Note")
+            return
+        }
+        check("notes.create",
+              learning.note(id: editingId) != nil,
+              "note \(editingId.prefix(8)) created")
+
+        // 3. The note must be in the list, not just in the store.
+        let listed = notes.visibleNotesForTest.contains { $0.id == editingId }
+        check("notes.list", listed, listed ? "note is listed" : "note is not in the list")
+
+        // 4. The editor must be showing, not the placeholder.
+        check("notes.editor", notes.editorIsVisibleForTest,
+              notes.editorIsVisibleForTest ? "editor is visible" : "editor is hidden")
+
+        // 5. Typing must reach the disk. This goes through the editor's own
+        //    insertion path, so the debounced auto-save is exercised rather
+        //    than short-circuited — and because it is debounced, the disk is
+        //    checked a moment later, not here.
+        let body = "self test \(UUID().uuidString.prefix(8))"
+        notes.typeIntoEditorForTest(body)
+
+        pendingNotesCheck = (id: editingId, body: body, before: before)
+        waitForNotesAutosave(attempt: 0)
+    }
+
+    /// Wait for the debounced auto-save to reach the disk.
+    ///
+    /// The save is debounced and the app's own work can keep the main thread
+    /// busy, so the check waits for the save rather than assuming when it
+    /// happens. It gives up rather than hanging the gate.
+    ///
+    /// What it checks is the *file*, not the store in memory: "the note is
+    /// in the store" and "the note is on the disk" are different claims, and
+    /// only the second one is the one the user cares about.
+    private func waitForNotesAutosave(attempt: Int) {
+        guard let pending = pendingNotesCheck else { return }
+        let learning = LearningStore.shared
+
+        let onDisk = Self.notesOnDisk()
+        if onDisk[pending.id] == pending.body {
+            check("notes.autosave", true, "the note is on disk")
+            finishNotesModuleCheck()
+            return
+        }
+
+        guard attempt < 60 else {
+            check("notes.autosave", false,
+                  learning.note(id: pending.id)?.body ?? "nothing saved")
+            finishNotesModuleCheck()
+            return
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
+            self?.waitForNotesAutosave(attempt: attempt + 1)
+        }
+    }
+
+    /// The notes as they are actually written on this machine.
+    private static func notesOnDisk() -> [String: String] {
+        let url = PathTools.applicationSupportDirectory().appendingPathComponent("learning.json")
+        guard let data = try? Data(contentsOf: url),
+              let state = try? JSONDecoder().decode(LearningState.self, from: data) else {
+            return [:]
+        }
+        return Dictionary(uniqueKeysWithValues: state.notes.map { ($0.id, $0.body) })
+    }
+
+    /// The second half of the notes check, once the debounce has had its
+    /// moment.
+    private func finishNotesModuleCheck() {
+        guard let pending = pendingNotesCheck else { return }
+        pendingNotesCheck = nil
+
+        let notes = controller.notesViewForTest
+        let learning = LearningStore.shared
+
+        // 6. The note must survive a trip through another module, still
+        //    listed and still in the editor.
+        controller.showModuleForTest("library")
+        controller.showModuleForTest("notes")
+        let stillListed = notes.visibleNotesForTest.contains { $0.id == pending.id }
+        let stillEditing = notes.editorTextForTest == pending.body
+        check("notes.survive", stillListed && stillEditing,
+              stillListed ? (stillEditing ? "note is still there" : "the editor lost the text")
+                          : "note vanished from the list")
+
+        // 7. And the test tidies up after itself.
+        learning.deleteNote(id: pending.id)
+        let leftovers = learning.allNotes.filter { !pending.before.contains($0.id) && $0.id != pending.id }
+        check("notes.cleanup", leftovers.isEmpty, "\(leftovers.count) stray note(s)")
+
+        controller.showModuleForTest("library")
+    }
+
     /// A completed document must produce a briefing the native reader can
     /// render.
     private func checkBriefing() {
@@ -311,7 +435,8 @@ final class SelfTestRunner {
     }
 
     /// The Mac helper, the on-device model and the Mac voice.
-    private func checkMacServices() {        let base = MacServices.shared.baseURL
+    private func checkMacServices() {
+        let base = MacServices.shared.baseURL
 
         // The provider endpoint must exist on the backend.
         if let spec = controller.specsForTest.first, let apiBase = spec.apiBase {
@@ -337,15 +462,21 @@ final class SelfTestRunner {
         check("mac.service", statusCode == 200, "HTTP \(statusCode), model: \(models)")
 
         // The on-device model must actually produce text.
+        //
+        // The prompt is deliberately plain. The model's own safety classifier
+        // rejects a request that asks for JSON and nothing else — it reads
+        // like an attempt to force the output — and the helper then fails a
+        // check that has nothing to do with the model being there.
         var chatRequest = URLRequest(url: base.appendingPathComponent("/mac/chat"))
         chatRequest.httpMethod = "POST"
         chatRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
         chatRequest.httpBody = try? JSONSerialization.data(withJSONObject: [
-            "system": "Reply with JSON only.",
-            "prompt": "Return {\"ok\": true} and nothing else.",
-            "json": true
+            "system": "You are a helpful assistant.",
+            "prompt": "Say hello."
         ])
-        chatRequest.timeoutInterval = 120
+        // The model on this Mac takes the better part of a minute to answer,
+        // and a cold one takes longer, so the check is given room.
+        chatRequest.timeoutInterval = 240
 
         var chatDone = false
         var chatText = ""
@@ -357,7 +488,7 @@ final class SelfTestRunner {
             chatDone = true
             chatSemaphore.signal()
         }.resume()
-        _ = chatSemaphore.wait(timeout: .now() + 130)
+        _ = chatSemaphore.wait(timeout: .now() + 250)
         check("mac.chat", chatDone && !chatText.isEmpty,
               chatText.isEmpty ? "no response from the on-device model" : chatText.trimmed(to: 60))
 

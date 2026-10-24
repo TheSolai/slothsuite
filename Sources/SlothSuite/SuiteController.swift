@@ -176,10 +176,26 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
         return NSSize(width: width, height: height)
     }
 
+    /// An optional `--action <name>` for the snapshot, so an interaction can be
+    /// performed before the window is rendered.
+    private static func snapshotAction() -> String? {
+        guard let index = CommandLine.arguments.firstIndex(of: "--action"),
+              CommandLine.arguments.count > index + 1 else { return nil }
+        return CommandLine.arguments[index + 1]
+    }
+
 
     private func runSnapshot() {
         guard let request = Self.snapshotRequest() else { return }
         Log.shared.write("snapshot requested for \(request.module)")
+
+        // A snapshot that never finishes must not leave the app running. A
+        // stray copy of the suite holds the learning store open and uploads
+        // its own fixture into the library.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 30.0) {
+            Log.shared.write("snapshot failed — timed out after 30 seconds")
+            exit(1)
+        }
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
             guard let self else { return }
@@ -205,10 +221,27 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
 
             self.showModule(request.module)
             Log.shared.write("snapshot module shown")
+
+            // An action can be performed first, so the render shows the
+            // result of an interaction rather than the idle state.
+            if let action = Self.snapshotAction() {
+                self.performSnapshotAction(action)
+            }
+
             // Let the module lay out and, for the reader, fetch its briefing.
             DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
                 self.captureWindow(to: request.path, in: .main)
             }
+        }
+    }
+
+    private func performSnapshotAction(_ action: String) {
+        switch action {
+        case "newnote":
+            notesView.pressNewNoteForTest()
+            Log.shared.write("snapshot action — pressed New Note")
+        default:
+            Log.shared.write("snapshot action — unknown action \(action)")
         }
     }
 
@@ -234,7 +267,13 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
         case .audio:
             view = AudioWindowController.shared.contentViewForInspection
         }
-        guard let view else { return }
+        guard let view else {
+            // A snapshot that cannot find its window must still stop. Leaving
+            // the app running turns a failed render into a stray process that
+            // holds the learning store open and uploads its own fixture.
+            Log.shared.write("snapshot failed — no view to render")
+            exit(1)
+        }
         view.layoutSubtreeIfNeeded()
 
         Log.shared.write("snapshot geometry — window \(window.frame) content \(view.frame) sidebar \(sidebar.frame)")
@@ -287,6 +326,12 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        // The notes editor saves on a debounce, so the last words typed can
+        // still be in flight when the app is asked to quit.
+        notesView.flushPendingSave()
+        // The store writes on its own queue, which the app is about to leave
+        // behind. Everything goes to the disk now, while there is still time.
+        LearningStore.shared.saveNow()
         health.stop()
         library.stopPolling()
         MacServices.shared.terminate()
@@ -667,6 +712,9 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
     /// Switch between the parts of the suite.
     private func showModule(_ id: String) {
         guard let module = SuiteModules.module(id: id), module.isAvailable else { return }
+        // Whatever was typed into the notes editor belongs to the note, even
+        // if the user walks away before the debounced save fires.
+        notesView.flushPendingSave()
         currentModule = id
 
         libraryView.isHidden = (id != "library")
@@ -1839,6 +1887,7 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
     var stackForTest: StackManager { stackManager }
     var configForTest: SuiteConfig { config }
     var currentSpecForTest: AppSpec { current }
+    var notesViewForTest: NotesView { notesView }
 
     func webViewForTest(_ id: String) -> WKWebView? { webViews[id] }
     func bridgeForTest(_ id: String) -> Bridge? { bridges[id] }

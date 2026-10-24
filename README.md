@@ -167,6 +167,13 @@ suite launches it on start and stops it on quit. If the SDK is missing, the
 build simply leaves it out and the suite falls back to Ollama and the
 browser's own voices.
 
+The helper binds to **127.0.0.1 only**, and it asks the model **one question
+at a time** — the on-device model is a single resource, and two questions at
+once make both of them slow. It also loads the model when it starts, so the
+first question does not wait for it. The model takes roughly **45 seconds** to
+answer on an Apple Silicon Mac, so the helper is not the fast provider: Ollama
+is. The Mac provider is the private one.
+
 Two features are built on it:
 
 - **Mac as an AI provider.** The backend can summarise with Apple's on-device
@@ -286,6 +293,46 @@ fence.
 - The sidebar no longer claims "Local · private · offline", because that
   stopped being true the moment the apps gained web access.
 
+## Colour
+
+The suite's colours come from the wrapped app's own palette — a violet-blue
+wordmark, cyan highlights, a green tick for "private on your machine", a gold
+note for "no key needed", a rose for warnings and a blue for links — but tuned
+for a **light** native macOS window, because the original was neon on dark and
+a neon palette on a light background is unreadable.
+
+Every colour is defined for light and dark, so the suite follows the system
+appearance. The fonts are all still the system sans: no serif, no display
+faces.
+
+The colours are not decoration — each one means something:
+
+| colour | what it marks |
+|---|---|
+| violet-blue | the suite itself, and the reader |
+| cyan | the library, and the audio that is playing |
+| green | the notes, a ready document, "private on your machine" |
+| gold | favourites, "no key needed", work in progress |
+| rose | a failure |
+| blue | PDFs, links, "continue reading" |
+
+They live in one file, `Sources/SlothSuite/Palette.swift`, so changing the
+look of the whole suite is one edit.
+
+## Notes
+
+The notes desk is plain AppKit: a list on the left, the note on the right, and
+a search box that filters as you type.
+
+- **New Note** makes a note and puts the caret in it.
+- The note **saves itself** a moment after you stop typing, and it saves
+  again when you leave the module or quit the app, so nothing is lost between
+  keystrokes and the disk.
+- The **row menu** (⋯) opens the document the note belongs to, or deletes the
+  note.
+- Notes live in `~/Library/Application Support/SlothSuite/learning.json`,
+  next to the configuration, and nowhere else.
+
 ## Self-test
 
 ```bash
@@ -300,6 +347,12 @@ state, the bridge round trip, the library endpoint, the web-tool
 endpoints, the file picker, and finally that an upload actually reaches
 the briefing deck. It exits non-zero if anything fails, so it works as a
 build gate.
+
+The notes module has its own end-to-end check, because the store can be
+perfectly healthy while the module is broken. It presses the real **New Note**
+button, types through the editor's own insertion path, waits for the
+auto-save to land **on the disk**, and confirms the note is still there after
+a trip through another module. It cleans up after itself.
 
 ## Child applications
 

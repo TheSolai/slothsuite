@@ -175,6 +175,10 @@ final class LibraryView: NSView, NSCollectionViewDataSource, NSCollectionViewDel
         addButton.font = Typography.body(weight: .medium)
         addButton.image = NSImage(systemSymbolName: "plus", accessibilityDescription: "Add document")
         addButton.imagePosition = .imageLeading
+        // The one action on this screen wears the suite's colour.
+        addButton.contentTintColor = Palette.accent
+        addButton.setColoredTitle("Add Document", color: Palette.accent,
+                                  font: Typography.body(weight: .medium))
 
         header.addSubview(titleLabel)
         header.addSubview(countLabel)
@@ -224,7 +228,9 @@ final class LibraryView: NSView, NSCollectionViewDataSource, NSCollectionViewDel
         continueButton.font = Typography.body(weight: .medium)
         continueButton.bezelStyle = .inline
         continueButton.isBordered = false
-        continueButton.contentTintColor = .controlAccentColor
+        continueButton.contentTintColor = Palette.blue
+        continueButton.setColoredTitle("Continue reading", color: Palette.blue,
+                                       font: Typography.body(weight: .medium))
         continueButton.image = NSImage(systemSymbolName: "arrow.right.circle", accessibilityDescription: nil)
         continueButton.imagePosition = .imageLeading
         continueButton.imageHugsTitle = true
@@ -360,7 +366,10 @@ final class LibraryView: NSView, NSCollectionViewDataSource, NSCollectionViewDel
     /// Show or hide the "Continue reading" shortcut.
     func setContinue(title: String?) {
         if let title {
-            continueButton.title = "Continue “\(title)”"
+            // The coloured title has to be set here too: assigning `title`
+            // throws away an attributed title, and the button would go grey.
+            continueButton.setColoredTitle("Continue “\(title)”", color: Palette.blue,
+                                           font: Typography.body(weight: .medium))
             continueButton.isHidden = false
         } else {
             continueButton.isHidden = true
@@ -655,22 +664,25 @@ final class LibraryCardItem: NSCollectionViewItem {
         let colour: NSColor
         if document.isReady {
             statusText = document.savedLabel ?? "ready"
-            colour = .systemGreen
+            colour = Palette.green
         } else if document.isFailed {
             statusText = "failed"
-            colour = .systemRed
+            colour = Palette.rose
         } else if document.isBusy {
             statusText = document.status
-            colour = .systemYellow
+            colour = Palette.gold
         } else {
             statusText = document.status
-            colour = .systemGray
+            colour = .tertiaryLabelColor
         }
         statusLabel.stringValue = statusText
         statusDot.layer?.backgroundColor = colour.cgColor
 
-        let badgeColour = NSColor.controlAccentColor.withAlphaComponent(0.16)
-        typeBadge.layer?.backgroundColor = badgeColour.cgColor
+        // The badge takes the colour of the file type, so the grid reads at a
+        // glance: violet for a book, blue for a paper.
+        let typeColour = Palette.colour(forFileType: document.fileType)
+        typeBadge.textColor = typeColour
+        typeBadge.layer?.backgroundColor = Palette.wash(typeColour, amount: 0.15).cgColor
 
         // Favourite and read state come from the suite's own memory, not
         // from the backend, so they are true even for documents that have
@@ -679,12 +691,12 @@ final class LibraryCardItem: NSCollectionViewItem {
         let isFavourite = learning.isFavourite(documentId: document.id)
         starButton.image = NSImage(systemSymbolName: isFavourite ? "star.fill" : "star",
                                    accessibilityDescription: isFavourite ? "Remove favourite" : "Favourite")
-        starButton.contentTintColor = isFavourite ? .systemYellow : .tertiaryLabelColor
+        starButton.contentTintColor = isFavourite ? Palette.gold : .tertiaryLabelColor
 
         let isRead = learning.isRead(documentId: document.id)
         readButton.image = NSImage(systemSymbolName: isRead ? "checkmark.circle.fill" : "circle",
                                    accessibilityDescription: isRead ? "Mark as unread" : "Mark as read")
-        readButton.contentTintColor = isRead ? .controlAccentColor : .tertiaryLabelColor
+        readButton.contentTintColor = isRead ? Palette.accent : .tertiaryLabelColor
     }
 
     @objc private func menuPressed() {
@@ -754,8 +766,18 @@ final class FilterChip: NSButton {
     }
 
     private func updateAppearance() {
-        let labelColour: NSColor = isChosen ? .labelColor : .secondaryLabelColor
-        let countColour: NSColor = isChosen ? .secondaryLabelColor : .tertiaryLabelColor
+        // Each filter keeps its own colour, so the row reads as four
+        // different questions rather than four grey labels.
+        let colour: NSColor
+        switch filter {
+        case .all: colour = Palette.teal
+        case .favourites: colour = Palette.gold
+        case .unread: colour = Palette.accent
+        case .ready: colour = Palette.green
+        }
+
+        let labelColour: NSColor = isChosen ? colour : colour.withAlphaComponent(0.75)
+        let countColour: NSColor = isChosen ? colour.withAlphaComponent(0.7) : .tertiaryLabelColor
 
         let title = NSMutableAttributedString(
             string: "\(filter.title) ",
@@ -778,7 +800,7 @@ final class FilterChip: NSButton {
         attributedTitle = title
 
         if isChosen {
-            layer?.backgroundColor = NSColor.controlAccentColor.withAlphaComponent(0.18).cgColor
+            layer?.backgroundColor = Palette.wash(colour, amount: 0.15).cgColor
         } else {
             layer?.backgroundColor = NSColor.clear.cgColor
         }

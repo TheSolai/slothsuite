@@ -104,7 +104,34 @@ func respondJSON(_ connection: NWConnection, status: Int, _ object: [String: Any
 
 // MARK: - Foundation Models
 
+/// Lets one caller through at a time.
+private final class AsyncGate: @unchecked Sendable {
+    private let semaphore = DispatchSemaphore(value: 1)
+
+    func acquire() async {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            // The wait happens on a background thread, so the caller's thread
+            // is never blocked.
+            DispatchQueue.global().async {
+                self.semaphore.wait()
+                continuation.resume()
+            }
+        }
+    }
+
+    func release() {
+        semaphore.signal()
+    }
+}
+
 enum MacModel {
+    /// The model is asked one question at a time.
+    ///
+    /// The on-device model is a single resource. Two questions at once make
+    /// both of them slow — the second can take twice as long as the first —
+    /// and neither is worth the wait. They take their turn here instead.
+    private static let gate = AsyncGate()
+
     static var isAvailable: Bool {
         if #available(macOS 26.0, *) {
             return SystemLanguageModel.default.availability == .available
@@ -121,9 +148,38 @@ enum MacModel {
             throw MacError.unavailable("The on-device model is not available on this Mac right now.")
         }
 
-        let session = LanguageModelSession(instructions: system)
-        let response = try await session.respond(to: prompt)
-        return response.content
+        await gate.acquire()
+        do {
+            let session = LanguageModelSession(instructions: system)
+            let response = try await session.respond(to: prompt)
+            gate.release()
+            return response.content
+        } catch {
+            gate.release()
+            throw error
+        }
+    }
+
+    /// Load the model now, so the first question does not pay for it.
+    ///
+    /// The first question to reach a cold model waits for the model to load —
+    /// over a minute, on this Mac. Loading it when the helper starts means
+    /// the helper is ready before anyone asks it anything.
+    static func warmUp() async -> String {
+        guard #available(macOS 26.0, *) else { return "the on-device model needs macOS 26 or later" }
+        guard SystemLanguageModel.default.availability == .available else {
+            return "the on-device model is not available on this Mac right now"
+        }
+
+        await gate.acquire()
+        defer { gate.release() }
+        let session = LanguageModelSession(instructions: "You are a helpful assistant.")
+        do {
+            let response = try await session.respond(to: "Say hello.")
+            return "ready in \(response.content.count) characters"
+        } catch {
+            return "could not load the model: \(error.localizedDescription)"
+        }
     }
 }
 
@@ -473,7 +529,25 @@ do {
         log("invalid port \(port)")
         exit(1)
     }
-    let listener = try NWListener(using: .tcp, on: nwPort)
+    // Bind to the loopback interface only.
+    //
+    // `NWListener(using:on:)` with nothing else binds to every interface,
+    // which put this service on the local network: any device on the Wi-Fi
+    // could POST /mac/chat and borrow the Mac's model, or GET /mac/speak.
+    // The header comment has always said this binds to 127.0.0.1 only —
+    // now the code says so too.
+    //
+    // The endpoint has to go on the *parameters* before the listener is
+    // made. Setting `listener.parameters.requiredLocalEndpoint` afterwards
+    // is silently ignored, because `NWListener(using:on:)` has already
+    // pinned the port to every interface by then.
+    let parameters = NWParameters.tcp
+    parameters.requiredLocalEndpoint = NWEndpoint.hostPort(
+        host: NWEndpoint.Host("127.0.0.1"),
+        port: nwPort
+    )
+    let listener = try NWListener(using: parameters)
+
     listener.newConnectionHandler = { connection in
         Server(connection: connection).start()
     }
@@ -489,6 +563,13 @@ do {
         }
     }
     listener.start(queue: queue)
+
+    // Load the model while nothing is waiting for it. The first question
+    // otherwise waits for the load, and the wait is over a minute.
+    Task {
+        let outcome = await MacModel.warmUp()
+        log("model warm-up — \(outcome)")
+    }
 
     // Keep the process alive.
     dispatchMain()

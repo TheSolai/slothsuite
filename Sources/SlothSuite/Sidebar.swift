@@ -56,6 +56,9 @@ final class SidebarView: NSVisualEffectView {
 
         let wordmark = NSTextField(labelWithString: "Sloth Suite")
         wordmark.font = Typography.wordmark()
+        // The wordmark carries the suite's colour, the way the wrapped app's
+        // did — but in the system face, at a size you can read.
+        wordmark.textColor = Palette.accent
 
         let tagline = NSTextField(labelWithString: "Your learning desk")
         tagline.font = Typography.secondary()
@@ -139,10 +142,23 @@ final class SidebarView: NSVisualEffectView {
     /// One quiet line: what is running.
     func setStatus(_ text: String) {
         statusLabel.stringValue = text
+        // The line takes the colour of the state it describes, so a glance
+        // at the sidebar says whether the stack is up.
+        let lowered = text.lowercased()
+        if lowered.contains("running") || lowered.contains("ready") {
+            statusLabel.textColor = Palette.green
+        } else if lowered.contains("starting") || lowered.contains("waiting") {
+            statusLabel.textColor = Palette.gold
+        } else if lowered.contains("down") || lowered.contains("stopped") || lowered.contains("failed") {
+            statusLabel.textColor = Palette.rose
+        } else {
+            statusLabel.textColor = .secondaryLabelColor
+        }
     }
 
     func setProvider(_ text: String) {
         providerLabel.stringValue = text
+        providerLabel.textColor = Palette.blue.withAlphaComponent(0.8)
     }
 
     // MARK: - Menu
@@ -272,18 +288,22 @@ final class NavButton: NSButton {
 
         alphaValue = 1
 
+        // Each module has a colour of its own, so the sidebar reads as a set
+        // of places rather than a list of grey rows.
+        let colour = Palette.colour(forModule: module.id)
+
         if isChosen {
             // A filled pill, the way macOS marks the current source list row.
-            layer?.backgroundColor = NSColor.controlAccentColor.withAlphaComponent(0.20).cgColor
-            contentTintColor = .labelColor
+            layer?.backgroundColor = Palette.wash(colour, amount: 0.18).cgColor
+            contentTintColor = colour
             font = Typography.body(weight: .semibold)
         } else if isHovering {
-            layer?.backgroundColor = NSColor.labelColor.withAlphaComponent(0.06).cgColor
-            contentTintColor = .labelColor
+            layer?.backgroundColor = Palette.wash(colour, amount: 0.09).cgColor
+            contentTintColor = colour
             font = Typography.body(weight: .medium)
         } else {
             layer?.backgroundColor = NSColor.clear.cgColor
-            contentTintColor = .secondaryLabelColor
+            contentTintColor = colour.withAlphaComponent(0.75)
             font = Typography.body(weight: .medium)
         }
     }
