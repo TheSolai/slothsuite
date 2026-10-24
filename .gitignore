@@ -1,0 +1,10 @@
+# Build artefacts
+build/
+*.o
+*.swiftmodule
+
+# macOS
+.DS_Store
+
+# Generated config (contains machine-specific paths)
+config.json
