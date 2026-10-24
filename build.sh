@@ -25,6 +25,7 @@ FRAMEWORKS=(
   -framework Network
   -framework ServiceManagement
   -framework UserNotifications
+  -framework AVFoundation
 )
 
 DEPLOY_TARGET="13.0"

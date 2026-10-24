@@ -30,6 +30,12 @@ final class Bridge: NSObject, WKScriptMessageHandler {
 
     /// Pending native → page requests, keyed by request id.
     private var pending: [String: (Result) -> Void] = [:]
+    /// The command each pending request is running.
+    ///
+    /// The page's reply carries the request id but not the command, so
+    /// without this the fallback can only say "no legacy fallback" without
+    /// saying which command it could not run.
+    private var pendingCommands: [String: String] = [:]
     private let lock = NSLock()
     private var sequence = 0
 
@@ -124,6 +130,7 @@ final class Bridge: NSObject, WKScriptMessageHandler {
             settled = true
             completion(result)
         }
+        pendingCommands[id] = command
         pendingWebViews[id] = webView
         lock.unlock()
 
@@ -153,6 +160,7 @@ final class Bridge: NSObject, WKScriptMessageHandler {
         lock.lock()
         let handler = pending.removeValue(forKey: id)
         pendingWebViews.removeValue(forKey: id)
+        pendingCommands.removeValue(forKey: id)
         lock.unlock()
         handler?(result)
     }
@@ -231,7 +239,7 @@ final class Bridge: NSObject, WKScriptMessageHandler {
 
     /// The pre-bridge behaviour, kept so an older frontend still works.
     private func legacyFallback(for id: String, body: [String: Any]) {
-        let command = body["command"] as? String ?? ""
+        let command = pendingCommands[id] ?? (body["command"] as? String ?? "")
 
         guard let webView = pendingWebViews[id] else {
             finish(id: id, result: .unsupported("no webview"))

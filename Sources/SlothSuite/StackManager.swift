@@ -10,7 +10,7 @@ import Network
 /// and waits for the filesystem/network to actually settle rather than
 /// sleeping for a fixed interval and hoping.
 final class StackManager {
-    private let config: SuiteConfig
+    private var config: SuiteConfig
     private let log: Log
 
     /// Services with an action currently in flight, so a restart request
@@ -27,6 +27,28 @@ final class StackManager {
 
     var scriptAvailable: Bool {
         FileManager.default.isReadableFile(atPath: scriptURL.path)
+    }
+
+    /// Look for the stack script in the places it usually lives.
+    ///
+    /// A stale path in the config file — a moved project, a renamed
+    /// machine — should not stop the suite from starting its stack. This
+    /// finds the script and adopts it.
+    func recoverScriptPath() -> Bool {
+        let candidates = [
+            PathTools.expandingTilde("~/Projects/sloth-stack.sh"),
+            PathTools.expandingTilde("~/Projects/SlothSuite/sloth-stack.sh"),
+            PathTools.expandingTilde("~/Projects/SlothSuite/../sloth-stack.sh")
+        ]
+
+        for candidate in candidates {
+            guard FileManager.default.isReadableFile(atPath: candidate) else { continue }
+            let resolved = URL(fileURLWithPath: candidate).standardizedFileURL.path
+            config.stackScript = resolved
+            log.write("recovered the stack script path to \(resolved)")
+            return true
+        }
+        return false
     }
 
     // MARK: - Running the script

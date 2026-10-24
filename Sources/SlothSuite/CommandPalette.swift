@@ -24,17 +24,29 @@ final class CommandPalette {
     private static var listStack: NSStackView!
     private static var commands: [Command] = []
     private static var matches: [Command] = []
+    private static var provider: ((String) -> [Command])?
     private static var highlighted = 0
 
     static func show(commands: [Command]) {
+        show(commands: commands, provider: nil)
+    }
+
+    /// Show the palette, asking `provider` for the command list on every
+    /// keystroke.
+    ///
+    /// A static list can only match the commands it was built with. The
+    /// palette is far more useful when it can also search the library and
+    /// the notes, and both of those change while it is open.
+    static func show(commands: [Command], provider: ((String) -> [Command])?) {
         self.commands = commands
+        self.provider = provider
 
         if panel == nil {
             buildPanel()
         }
 
         field.stringValue = ""
-        matches = commands
+        matches = provider?("") ?? commands
         highlighted = 0
         rebuildList()
 
@@ -116,13 +128,19 @@ final class CommandPalette {
     // MARK: - List
 
     private static func filter(_ query: String) {
-        let needle = query.trimmingCharacters(in: .whitespaces).lowercased()
-        if needle.isEmpty {
-            matches = commands
+        if let provider {
+            // The provider sees the raw query, so it can rank documents and
+            // notes by their own rules rather than a plain substring test.
+            matches = provider(query)
         } else {
-            matches = commands.filter { command in
-                command.title.lowercased().contains(needle)
-                    || (command.subtitle?.lowercased().contains(needle) ?? false)
+            let needle = query.trimmingCharacters(in: .whitespaces).lowercased()
+            if needle.isEmpty {
+                matches = commands
+            } else {
+                matches = commands.filter { command in
+                    command.title.lowercased().contains(needle)
+                        || (command.subtitle?.lowercased().contains(needle) ?? false)
+                }
             }
         }
         highlighted = 0
@@ -133,7 +151,7 @@ final class CommandPalette {
         listStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
 
         guard !matches.isEmpty else {
-            let empty = NSTextField(labelWithString: "No matching command")
+            let empty = NSTextField(labelWithString: "No matching command, document or note")
             empty.font = .systemFont(ofSize: 12)
             empty.textColor = .secondaryLabelColor
             listStack.addArrangedSubview(empty)

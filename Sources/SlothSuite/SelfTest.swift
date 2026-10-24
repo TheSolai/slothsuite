@@ -18,6 +18,10 @@ final class SelfTestRunner {
     private var failures = 0
     private var checks = 0
 
+    /// The documents that were in the library before the test uploaded
+    /// anything, so the test can take its own litter away again.
+    private var libraryIdsBeforeUpload: Set<String> = []
+
     init(controller: SuiteController) {
         self.controller = controller
     }
@@ -75,13 +79,69 @@ final class SelfTestRunner {
         let webView = controller.webViewForTest(activeID)
         check("webview.attached", webView != nil, activeID)
 
-        // Give the page a moment to finish loading before probing it.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 4.0) { [weak self] in
+        // Show the app module and wait for the page to actually be ready,
+        // rather than guessing how long it takes to mount.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
             self?.continueRun()
         }
     }
 
     private func continueRun() {
+        // The webview lives in the App module; make sure it is the one
+        // on screen before probing it.
+        controller.showModuleForTest("app")
+        waitForPageReady(attempt: 0)
+    }
+
+    /// Wait until the page is actually ready to take commands.
+    ///
+    /// The wrapped app is a React page, and the navigation finishing is not
+    /// the same as the app having mounted and registered its bridge handler.
+    /// A fixed sleep was a race — the redesign widened it, because the page
+    /// now loads when the App module is first shown rather than at launch.
+    ///
+    /// So the gate waits for the two things it actually needs: a title, and
+    /// a bridge that answers.
+    private func waitForPageReady(attempt: Int) {
+        let activeID = controller.currentSpecForTest.id
+        let webView = controller.webViewForTest(activeID)
+
+        guard attempt < 60 else {
+            check("page.ready", false, "the page never became ready")
+            continueAfterReady()
+            return
+        }
+
+        guard !(webView?.title ?? "").isEmpty else {
+            retryReady(after: 0.5, attempt: attempt)
+            return
+        }
+
+        guard let bridge = controller.bridgeForTest(activeID), let webView else {
+            continueAfterReady()
+            return
+        }
+
+        bridge.perform("status", in: webView) { [weak self] result in
+            guard let self else { return }
+            switch result {
+            case .success:
+                self.check("page.ready", true, webView.title ?? "ready")
+                self.continueAfterReady()
+            case .failure, .unsupported:
+                self.retryReady(after: 0.5, attempt: attempt)
+            }
+        }
+    }
+
+    private func retryReady(after delay: TimeInterval, attempt: Int) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+            self?.waitForPageReady(attempt: attempt + 1)
+        }
+    }
+
+    /// Everything that needed a live page.
+    private func continueAfterReady() {
         let activeID = controller.currentSpecForTest.id
         let webView = controller.webViewForTest(activeID)
 
@@ -124,12 +184,23 @@ final class SelfTestRunner {
                 check("library.documents",
                       http?.statusCode == 200 && documents != nil,
                       "HTTP \(http?.statusCode ?? 0), \(documents?.count ?? -1) documents")
+
+                // Remember what was there, so the upload test can remove the
+                // document it creates.
+                libraryIdsBeforeUpload = Set(
+                    (documents ?? []).compactMap { $0["doc_id"] as? String }
+                )
             } else {
                 check("library.documents", false, "no response from \(url)")
             }
         }
 
-        // 8. The web-tools endpoints must exist. A 404 means the backend has
+        // 8. The native modules must switch cleanly, and the suite's own
+        //    learning store must survive a round trip.
+        checkLearningModules()
+        checkBriefing()
+
+        // 9. The web-tools endpoints must exist. A 404 means the backend has
         //    no web access wired up; a 502 means it tried and the network
         //    said no, which still proves the endpoint is wired.
         for spec in controller.specsForTest {
@@ -167,9 +238,80 @@ final class SelfTestRunner {
         }
     }
 
+    /// The native modules must switch cleanly, and the suite's own learning
+    /// store — notes, favourites, read state — must survive a round trip.
+    ///
+    /// The store is the user's own data, so the test cleans up after itself:
+    /// it creates a note under a synthetic document id and removes it again.
+    private func checkLearningModules() {
+        for module in SuiteModules.all where module.isAvailable {
+            controller.showModuleForTest(module.id)
+            check("module.\(module.id)",
+                  controller.currentModuleForTest() == module.id,
+                  module.title)
+        }
+
+        let learning = LearningStore.shared
+        let marker = "selftest-\(UUID().uuidString)"
+
+        let note = learning.addNote(documentId: marker, documentTitle: "Self test", body: "first")
+        learning.updateNote(id: note.id, body: "second")
+        check("learning.note",
+              learning.note(id: note.id)?.body == "second",
+              learning.note(id: note.id)?.body ?? "missing")
+
+        learning.toggleFavourite(documentId: marker)
+        let favourite = learning.isFavourite(documentId: marker)
+        learning.toggleFavourite(documentId: marker)
+        check("learning.favourite",
+              favourite && !learning.isFavourite(documentId: marker),
+              "toggles both ways")
+
+        learning.toggleRead(documentId: marker)
+        let read = learning.isRead(documentId: marker)
+        learning.toggleRead(documentId: marker)
+        check("learning.read",
+              read && !learning.isRead(documentId: marker),
+              "toggles both ways")
+
+        learning.deleteNote(id: note.id)
+        check("learning.cleanup", learning.note(id: note.id) == nil, "note removed")
+    }
+
+    /// A completed document must produce a briefing the native reader can
+    /// render.
+    private func checkBriefing() {
+        guard let spec = controller.specsForTest.first(where: { $0.supportsLibrary }),
+              let base = spec.apiBase else {
+            check("briefing.fetch", false, "no library endpoint")
+            return
+        }
+
+        guard let (data, _) = Self.fetch(base.appendingPathComponent("/api/documents")),
+              let json = JSONTools.dictionary(from: data),
+              let documents = json["documents"] as? [[String: Any]],
+              let ready = documents.first(where: { ($0["status"] as? String) == "completed" }),
+              let docId = ready["doc_id"] as? String else {
+            check("briefing.fetch", false, "no completed document to read")
+            return
+        }
+
+        guard let (docData, response) = Self.fetch(base.appendingPathComponent("/api/documents/\(docId)")),
+              let status = (response as? HTTPURLResponse)?.statusCode,
+              (200..<300).contains(status),
+              let record = JSONTools.dictionary(from: docData),
+              let briefing = Briefing(json: record) else {
+            check("briefing.fetch", false, "could not read the briefing")
+            return
+        }
+
+        check("briefing.fetch",
+              !briefing.title.isEmpty && (!briefing.chapters.isEmpty || !briefing.executiveSummary.isEmpty),
+              "\(briefing.title) — \(briefing.chapters.count) chapters")
+    }
+
     /// The Mac helper, the on-device model and the Mac voice.
-    private func checkMacServices() {
-        let base = MacServices.shared.baseURL
+    private func checkMacServices() {        let base = MacServices.shared.baseURL
 
         // The provider endpoint must exist on the backend.
         if let spec = controller.specsForTest.first, let apiBase = spec.apiBase {
@@ -273,6 +415,7 @@ final class SelfTestRunner {
                 let moving = processing.contains { stage.lowercased().contains($0) }
                 self.check("upload.pipeline", moving || deck, "stage: \(stage)")
                 self.log.write("SELFTEST INFO deck-visible=\(deck)")
+                self.removeUploadedDocuments()
                 self.finish()
             }
         }
@@ -299,6 +442,32 @@ final class SelfTestRunner {
 
     // MARK: - Helpers
 
+    /// Delete the document the upload test created.
+    ///
+    /// A gate that runs on every build must not leave a copy of the fixture
+    /// in the user's library each time it runs.
+    private func removeUploadedDocuments() {
+        guard let spec = controller.specsForTest.first(where: { $0.supportsLibrary }),
+              let base = spec.apiBase else { return }
+
+        guard let (data, _) = Self.fetch(base.appendingPathComponent("/api/documents")),
+              let json = JSONTools.dictionary(from: data),
+              let documents = json["documents"] as? [[String: Any]] else {
+            return
+        }
+
+        let now = Set(documents.compactMap { $0["doc_id"] as? String })
+        let added = now.subtracting(libraryIdsBeforeUpload)
+        guard !added.isEmpty else { return }
+
+        var removed = 0
+        for id in added {
+            let url = base.appendingPathComponent("/api/documents/\(id)")
+            if Self.delete(url) { removed += 1 }
+        }
+        log.write("SELFTEST cleanup — removed \(removed) uploaded document(s)")
+    }
+
     private static func fetch(_ url: URL) -> (Data, URLResponse)? {
         var request = URLRequest(url: url)
         request.timeoutInterval = 5
@@ -316,6 +485,25 @@ final class SelfTestRunner {
 
         _ = semaphore.wait(timeout: .now() + 6)
         return done ? result : nil
+    }
+
+    /// Delete a document.
+    private static func delete(_ url: URL) -> Bool {
+        var request = URLRequest(url: url)
+        request.httpMethod = "DELETE"
+        request.timeoutInterval = 5
+        var status = 0
+        var done = false
+
+        let semaphore = DispatchSemaphore(value: 0)
+        URLSession.shared.dataTask(with: request) { _, response, _ in
+            status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            done = true
+            semaphore.signal()
+        }.resume()
+
+        _ = semaphore.wait(timeout: .now() + 6)
+        return done && (200..<300).contains(status)
     }
 
     /// Locate a document to upload.

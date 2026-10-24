@@ -4,7 +4,7 @@ import ServiceManagement
 import UserNotifications
 import WebKit
 
-/// The suite shell: one native window wrapping the local sloth apps.
+/// The suite shell: a native window over the local learning apps.
 ///
 /// The central change from the original single-webview design is that each
 /// app keeps its own `WKWebView`. Switching apps no longer re-navigates, so
@@ -19,19 +19,30 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
     private var window: NSWindow!
     private var sidebar: SidebarView!
     private var contentContainer: NSView!
+    private var webContainer: NSView!
+    private var libraryView: LibraryView!
+    private var readerView: ReaderView!
+    private var notesView: NotesView!
     private var dropView: DropView!
+
+    /// The document currently open in the reader.
+    private var openDocumentId: String?
+
+    /// Pins the content view to the window's content area.
+    private var contentSizeConstraints: (width: NSLayoutConstraint, height: NSLayoutConstraint)?
 
     private var webViews: [String: WKWebView] = [:]
     private var bridges: [String: Bridge] = [:]
     private var loaded: Set<String> = []
 
+    /// Which part of the suite is on screen: "library" or "reader".
+    private var currentModule = "library"
+
     private var current: AppSpec
     private let health = HealthMonitor()
     private var stackManager: StackManager!
-    private var libraryTimer: Timer?
+    private let library = LibraryStore.shared
 
-    /// Set when the stack was started on our behalf, so the active page can
-    /// be reloaded once the backend actually answers.
     private var pendingReloadAfterStackStart = false
     private var webAccessEnabled: Bool?
     private var aiProvider = "ollama"
@@ -52,8 +63,10 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
     private var selfTestRunner: SelfTestRunner?
 
     private let lastAppKey = "SlothSuite.lastAppId"
+    private let lastModuleKey = "SlothSuite.lastModule"
 
     override init() {
+
         let loadedConfig = SuiteConfig.load()
         self.config = loadedConfig.config
         self.configProblem = loadedConfig.problem
@@ -74,7 +87,10 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
         MacServices.shared.launch()
 
         buildWindow()
+        buildToolbar()
         buildMenu()
+        wireLibrary()
+
         health.currentSpecs = specs
         health.onUpdate = { [weak self] id, status in
             self?.applyHealth(id: id, status: status)
@@ -84,12 +100,13 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
         }
         health.start(interval: config.pollInterval)
 
-        // Restore whichever app was open when the suite was last quit.
+        // Restore where the user was.
         if let remembered = UserDefaults.standard.string(forKey: lastAppKey),
            let spec = config.app(id: remembered) {
             current = spec
         }
-        select(current)
+        let rememberedModule = UserDefaults.standard.string(forKey: lastModuleKey) ?? "library"
+        showModule(rememberedModule == "reader" ? "reader" : "library")
 
         // Give the stack a moment to answer before deciding whether to
         // start it, so an already-running stack is never duplicated.
@@ -97,9 +114,7 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
             self?.startStackIfNeeded()
         }
 
-        libraryTimer = Timer.scheduledTimer(withTimeInterval: 20, repeats: true) { [weak self] _ in
-            self?.reloadLibrary()
-        }
+        library.startPolling(spec: specs.first(where: { $0.supportsLibrary }))
 
         NSApp.activate(ignoringOtherApps: true)
 
@@ -112,13 +127,173 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
         if CommandLine.arguments.contains("--selftest") {
             runSelfTest()
         }
+
+        if Self.snapshotRequest() != nil {
+            runSnapshot()
+        }
+
+        // Adding a toolbar changes the window's height, so the frame is
+        // asserted once more now that the whole window is assembled.
+        if let frame = UserDefaults.standard.string(forKey: "SlothSuite.windowFrame") {
+            let stored = NSRectFromString(frame)
+            if stored.width >= 1000, stored.height >= 680 {
+                window.setFrame(stored, display: true)
+            }
+        } else {
+            window.setContentSize(NSSize(width: 1320, height: 880))
+        }
+
+        Log.shared.write("launch complete — window \(window.frame.size)")
+    }
+
+    // MARK: - Snapshot
+
+    /// A request to render one module to a PNG.
+    ///
+    /// `--snapshot <module>:<path>` shows the module, renders the window and
+    /// exits. It exists so the interface can be inspected without screen
+    /// recording permission, which a command-line agent does not have.
+    private static func snapshotRequest() -> (module: String, path: String)? {
+        guard let index = CommandLine.arguments.firstIndex(of: "--snapshot"),
+              CommandLine.arguments.count > index + 1 else { return nil }
+
+        let argument = CommandLine.arguments[index + 1]
+        let parts = argument.split(separator: ":", maxSplits: 1).map(String.init)
+        guard parts.count == 2 else { return nil }
+        return (parts[0], parts[1])
+    }
+
+    /// An optional `--size 1000x680` for the snapshot, so the layout can be
+    /// checked at the window's smallest useful size.
+    private static func snapshotSize() -> NSSize? {
+        guard let index = CommandLine.arguments.firstIndex(of: "--size"),
+              CommandLine.arguments.count > index + 1 else { return nil }
+
+        let parts = CommandLine.arguments[index + 1].lowercased().split(separator: "x")
+        guard parts.count == 2, let width = Double(parts[0]), let height = Double(parts[1]) else {
+            return nil
+        }
+        return NSSize(width: width, height: height)
+    }
+
+
+    private func runSnapshot() {
+        guard let request = Self.snapshotRequest() else { return }
+        Log.shared.write("snapshot requested for \(request.module)")
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+            guard let self else { return }
+
+            // A snapshot can ask for a particular window size, so the layout
+            // can be checked at the window's smallest useful size.
+            if let size = Self.snapshotSize(), let window = self.window {
+                window.setContentSize(size)
+            }
+
+            // The audio window is a pop-out, so it needs the reader to have a
+            // briefing before it can be shown.
+            if request.module == "audio" {
+                self.showModule("reader")
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+                    self.openAudioWindowForInspection()
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                        self.captureWindow(to: request.path, in: .audio)
+                    }
+                }
+                return
+            }
+
+            self.showModule(request.module)
+            Log.shared.write("snapshot module shown")
+            // Let the module lay out and, for the reader, fetch its briefing.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
+                self.captureWindow(to: request.path, in: .main)
+            }
+        }
+    }
+
+    private enum SnapshotTarget {
+        case main
+        case audio
+    }
+
+    private func openAudioWindowForInspection() {
+        guard let id = openDocumentId ?? LearningStore.shared.lastReadDocumentId,
+              let briefing = BriefingStore.shared.briefing(documentId: id) else {
+            Log.shared.write("snapshot failed — no briefing to open the audio window with")
+            return
+        }
+        AudioWindowController.shared.show(briefing: briefing)
+    }
+
+    private func captureWindow(to path: String, in target: SnapshotTarget = .main) {
+        let view: NSView?
+        switch target {
+        case .main:
+            view = window.contentView
+        case .audio:
+            view = AudioWindowController.shared.contentViewForInspection
+        }
+        guard let view else { return }
+        view.layoutSubtreeIfNeeded()
+
+        Log.shared.write("snapshot geometry — window \(window.frame) content \(view.frame) sidebar \(sidebar.frame)")
+        Log.shared.write("library frames — \(libraryView.headerFrames())")
+        Log.shared.write("view tree —\n\(Self.describeTree(view, depth: 0))")
+
+        guard let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else {
+            Log.shared.write("snapshot failed — could not make a bitmap")
+            exit(1)
+        }
+        view.cacheDisplay(in: view.bounds, to: rep)
+
+        guard let data = rep.representation(using: .png, properties: [:]) else {
+            Log.shared.write("snapshot failed — could not encode a PNG")
+            exit(1)
+        }
+
+        do {
+            try data.write(to: URL(fileURLWithPath: path))
+            Log.shared.write("snapshot written to \(path)")
+            exit(0)
+        } catch {
+            Log.shared.write("snapshot failed — \(error)")
+            exit(1)
+        }
+    }
+
+    /// Print the view tree with frames, so a broken layout can be read back
+    /// instead of guessed at.
+    private static func describeTree(_ view: NSView, depth: Int) -> String {
+        var lines: [String] = []
+        let pad = String(repeating: "  ", count: depth)
+        let flag = view.isHidden ? " hidden" : ""
+        let alpha = view.alphaValue < 1 ? " alpha=\(view.alphaValue)" : ""
+        let autoresizing = view.translatesAutoresizingMaskIntoConstraints ? " AUTORESIZING" : ""
+        let text: String
+        if let field = view as? NSTextField {
+            text = " text=\"\(field.stringValue.prefix(28))\""
+        } else if let button = view as? NSButton {
+            text = " title=\"\(button.title)\""
+        } else {
+            text = ""
+        }
+        lines.append("\(pad)\(type(of: view)) f=\(view.frame) flags=\(view.autoresizingMask.rawValue)\(flag)\(alpha)\(autoresizing)\(text)")
+
+        for child in view.subviews {
+            lines.append(describeTree(child, depth: depth + 1))
+        }
+        return lines.joined(separator: "\n")
     }
 
     func applicationWillTerminate(_ notification: Notification) {
         health.stop()
-        libraryTimer?.invalidate()
+        library.stopPolling()
         MacServices.shared.terminate()
+        AudioPlayer.shared.stop()
+        saveWindowFrame()
         UserDefaults.standard.set(current.id, forKey: lastAppKey)
+        UserDefaults.standard.set(currentModule, forKey: lastModuleKey)
     }
 
     // MARK: - Window
@@ -129,21 +304,128 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
                           backing: .buffered,
                           defer: false)
         window.title = "Sloth Suite"
-        window.setFrameAutosaveName("SlothSuiteWindow")
-        window.minSize = NSSize(width: 900, height: 600)
 
-        sidebar = SidebarView(specs: specs)
-        sidebar.onSelect = { [weak self] id in
-            guard let self, let spec = self.config.app(id: id) else { return }
-            self.select(spec)
+        // The minimum size has to be set before anything else can shrink the
+        // window.
+        let minimum = NSSize(width: 1000, height: 680)
+        window.minSize = minimum
+        window.contentMinSize = minimum
+
+        // The frame is managed by hand rather than by AppKit's autosave.
+        //
+        // AppKit's autosave restores a saved frame without consulting
+        // `minSize`, and assigning a content view can shrink the window to
+        // the content's fitting size. Either one is enough to leave the app
+        // in a 573×124 window that is useless — which is exactly what
+        // happened. A frame is only saved when it is big enough to be worth
+        // restoring, and it is always re-checked on the way in.
+        let desiredFrame = Self.restoreUsableFrame(window, minimum: minimum)
+
+        sidebar = SidebarView(modules: SuiteModules.all)
+        sidebar.onSelectModule = { [weak self] id in
+            self?.showModule(id)
         }
         sidebar.onAction = { [weak self] action in
             self?.handle(action)
         }
-        sidebar.widthAnchor.constraint(equalToConstant: 244).isActive = true
+        sidebar.widthAnchor.constraint(equalToConstant: 228).isActive = true
 
         contentContainer = NSView()
         contentContainer.translatesAutoresizingMaskIntoConstraints = false
+        // The content area paints the window background rather than staying
+        // transparent, so the modules sit on a real surface instead of
+        // whatever happens to be behind them.
+        contentContainer.wantsLayer = true
+        contentContainer.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+
+        // The native library.
+        libraryView = LibraryView()
+        libraryView.translatesAutoresizingMaskIntoConstraints = false
+        libraryView.onOpen = { [weak self] document in
+            self?.openDocument(document)
+        }
+        libraryView.onExport = { [weak self] document in
+            self?.performExport(document: document)
+        }
+        libraryView.onSpeak = { [weak self] document in
+            self?.speakSummary(for: document)
+        }
+        libraryView.onDelete = { [weak self] document in
+            self?.confirmDelete(id: document.id, title: document.title)
+        }
+        libraryView.onAdd = { [weak self] in
+            self?.addDocument()
+        }
+        libraryView.onFilterChange = { filter in
+            LibraryStore.shared.setFilter(filter)
+        }
+        libraryView.onToggleFavourite = { [weak self] document in
+            LearningStore.shared.toggleFavourite(documentId: document.id)
+            self?.libraryView.update(documents: LibraryStore.shared.filtered)
+        }
+        libraryView.onToggleRead = { [weak self] document in
+            LearningStore.shared.toggleRead(documentId: document.id)
+            self?.libraryView.update(documents: LibraryStore.shared.filtered)
+        }
+        libraryView.onAddNote = { [weak self] document in
+            self?.startNote(for: document)
+        }
+        libraryView.onContinue = { [weak self] in
+            self?.continueReading()
+        }
+
+        // The native reader.
+        readerView = ReaderView()
+        readerView.translatesAutoresizingMaskIntoConstraints = false
+        readerView.onSpeakChapter = { [weak self] chapter in
+            self?.speakText(chapter.spokenText, title: chapter.title)
+        }
+        readerView.onSpeakAll = { [weak self] briefing in
+            self?.speakEverything(briefing)
+        }
+        readerView.onOpenChapters = { briefing in
+            AudioWindowController.shared.show(briefing: briefing)
+        }
+        readerView.onAddNote = { [weak self] briefing in
+            self?.startNote(forDocumentId: briefing.documentId, title: briefing.title)
+        }
+        readerView.onOpenInApp = { [weak self] briefing in
+            self?.openInApp(documentId: briefing.documentId)
+        }
+        readerView.onExport = { [weak self] briefing in
+            self?.performExport(document: nil)
+        }
+        readerView.onChapterChanged = { [weak self] chapter in
+            guard let self, let id = self.openDocumentId else { return }
+            LearningStore.shared.markReading(documentId: id, chapter: chapter)
+        }
+
+        // The native notes module.
+        notesView = NotesView()
+        notesView.translatesAutoresizingMaskIntoConstraints = false
+        notesView.onSelectNote = { [weak self] note in
+            self?.notesView.select(noteId: note.id)
+        }
+        notesView.onDeleteNote = { [weak self] note in
+            self?.confirmDeleteNote(note)
+        }
+        notesView.onChangeNoteBody = { noteId, body in
+            LearningStore.shared.updateNote(id: noteId, body: body)
+        }
+        notesView.onCreateNote = { [weak self] in
+            self?.notesView.beginNewNote()
+        }
+        notesView.onOpenDocument = { [weak self] note in
+            guard !note.documentId.isEmpty else { return }
+            self?.openDocument(id: note.documentId)
+        }
+        notesView.onSearch = { [weak self] query in
+            self?.filterNotes(query)
+        }
+
+        // The wrapped web app.
+        webContainer = NSView()
+        webContainer.translatesAutoresizingMaskIntoConstraints = false
 
         dropView = DropView()
         dropView.translatesAutoresizingMaskIntoConstraints = false
@@ -151,8 +433,6 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
             self?.importDroppedFile(url)
         }
 
-        // One webview per app. All of them stay in the hierarchy (hidden when
-        // inactive) so that their pages keep their state between switches.
         for spec in specs {
             let configuration = WKWebViewConfiguration()
             configuration.userContentController.addUserScript(
@@ -167,8 +447,8 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
             if #available(macOS 13.4, *) {
                 webView.isInspectable = true
             }
-            // Follow the system appearance so the page does not flash a
-            // different colour against the window chrome.
+            // Follow the window's background so the page does not flash a
+            // different colour against the chrome.
             webView.underPageBackgroundColor = .windowBackgroundColor
 
             let container = NSView()
@@ -179,11 +459,11 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
             webView.topAnchor.constraint(equalTo: container.topAnchor).isActive = true
             webView.bottomAnchor.constraint(equalTo: container.bottomAnchor).isActive = true
 
-            contentContainer.addSubview(container)
-            container.leadingAnchor.constraint(equalTo: contentContainer.leadingAnchor).isActive = true
-            container.trailingAnchor.constraint(equalTo: contentContainer.trailingAnchor).isActive = true
-            container.topAnchor.constraint(equalTo: contentContainer.topAnchor).isActive = true
-            container.bottomAnchor.constraint(equalTo: contentContainer.bottomAnchor).isActive = true
+            webContainer.addSubview(container)
+            container.leadingAnchor.constraint(equalTo: webContainer.leadingAnchor).isActive = true
+            container.trailingAnchor.constraint(equalTo: webContainer.trailingAnchor).isActive = true
+            container.topAnchor.constraint(equalTo: webContainer.topAnchor).isActive = true
+            container.bottomAnchor.constraint(equalTo: webContainer.bottomAnchor).isActive = true
 
             webViews[spec.id] = webView
 
@@ -195,12 +475,30 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
             configuration.userContentController.add(bridge, name: "sloth")
         }
 
-        let root = NSStackView()
-        root.orientation = .horizontal
-        root.spacing = 0
-        root.translatesAutoresizingMaskIntoConstraints = false
+        contentContainer.addSubview(libraryView)
+        contentContainer.addSubview(readerView)
+        contentContainer.addSubview(notesView)
+        contentContainer.addSubview(webContainer)
 
-        root.addArrangedSubview(sidebar)
+        libraryView.leadingAnchor.constraint(equalTo: contentContainer.leadingAnchor).isActive = true
+        libraryView.trailingAnchor.constraint(equalTo: contentContainer.trailingAnchor).isActive = true
+        libraryView.topAnchor.constraint(equalTo: contentContainer.topAnchor).isActive = true
+        libraryView.bottomAnchor.constraint(equalTo: contentContainer.bottomAnchor).isActive = true
+
+        readerView.leadingAnchor.constraint(equalTo: contentContainer.leadingAnchor).isActive = true
+        readerView.trailingAnchor.constraint(equalTo: contentContainer.trailingAnchor).isActive = true
+        readerView.topAnchor.constraint(equalTo: contentContainer.topAnchor).isActive = true
+        readerView.bottomAnchor.constraint(equalTo: contentContainer.bottomAnchor).isActive = true
+
+        notesView.leadingAnchor.constraint(equalTo: contentContainer.leadingAnchor).isActive = true
+        notesView.trailingAnchor.constraint(equalTo: contentContainer.trailingAnchor).isActive = true
+        notesView.topAnchor.constraint(equalTo: contentContainer.topAnchor).isActive = true
+        notesView.bottomAnchor.constraint(equalTo: contentContainer.bottomAnchor).isActive = true
+
+        webContainer.leadingAnchor.constraint(equalTo: contentContainer.leadingAnchor).isActive = true
+        webContainer.trailingAnchor.constraint(equalTo: contentContainer.trailingAnchor).isActive = true
+        webContainer.topAnchor.constraint(equalTo: contentContainer.topAnchor).isActive = true
+        webContainer.bottomAnchor.constraint(equalTo: contentContainer.bottomAnchor).isActive = true
 
         let right = NSView()
         right.translatesAutoresizingMaskIntoConstraints = false
@@ -215,22 +513,253 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
         contentContainer.topAnchor.constraint(equalTo: right.topAnchor).isActive = true
         contentContainer.bottomAnchor.constraint(equalTo: right.bottomAnchor).isActive = true
 
-        root.addArrangedSubview(right)
+        // A plain view with explicit constraints, not a stack view.
+        //
+        // A horizontal `NSStackView` whose arranged subview has no intrinsic
+        // content size (a bare `NSView`) does not reliably hand the remaining
+        // width to that subview — the content area collapsed to a narrow
+        // column while the space to its right went unused.
+        // The content view keeps AppKit's own resizing — it is the window
+        // that owns its frame. Turning that off left the view at whatever
+        // size it was created with.
+        let root = NSView()
+        root.autoresizingMask = [.width, .height]
+        root.addSubview(sidebar)
+        root.addSubview(right)
+
+        // The content view's size has to be pinned, or it is ambiguous: the
+        // sidebar is pinned to its leading edge and the content to its
+        // trailing edge, but nothing says how wide the whole thing is. Left
+        // ambiguous, Auto Layout resolved it to the smallest size the
+        // contents allowed and AppKit then resized the window to match —
+        // which is how the app ended up 573 points wide.
+        let desiredContent = window.contentRect(forFrameRect: desiredFrame).size
+        let pinnedWidth = root.widthAnchor.constraint(equalToConstant: desiredContent.width)
+        let pinnedHeight = root.heightAnchor.constraint(equalToConstant: desiredContent.height)
+        pinnedWidth.isActive = true
+        pinnedHeight.isActive = true
+        contentSizeConstraints = (pinnedWidth, pinnedHeight)
+
+        // Keep the pin in step with the window when the user resizes it.
+        NotificationCenter.default.addObserver(
+            forName: NSWindow.didResizeNotification,
+            object: window,
+            queue: .main
+        ) { [weak self] _ in
+            guard let self, let window = self.window else { return }
+            let content = window.contentRect(forFrameRect: window.frame).size
+            self.contentSizeConstraints?.width.constant = content.width
+            self.contentSizeConstraints?.height.constant = content.height
+        }
+
+        sidebar.leadingAnchor.constraint(equalTo: root.leadingAnchor).isActive = true
+        sidebar.topAnchor.constraint(equalTo: root.topAnchor).isActive = true
+        sidebar.bottomAnchor.constraint(equalTo: root.bottomAnchor).isActive = true
+        sidebar.widthAnchor.constraint(equalToConstant: 228).isActive = true
+
+        right.leadingAnchor.constraint(equalTo: sidebar.trailingAnchor).isActive = true
+        right.trailingAnchor.constraint(equalTo: root.trailingAnchor).isActive = true
+        right.topAnchor.constraint(equalTo: root.topAnchor).isActive = true
+        right.bottomAnchor.constraint(equalTo: root.bottomAnchor).isActive = true
 
         window.contentView = root
+
+        // The window is put back to the size it should be *after* it is on
+        // screen.
+        //
+        // Showing a window makes AppKit resize it to the content view's
+        // fitting size. The content view's size is not pinned to anything —
+        // its subviews are pinned to its edges — so that fitting size is
+        // small, and the window came up 573 points wide with the library
+        // spilling across the sidebar. Re-asserting the frame afterwards is
+        // what actually gives the app a usable window.
+        window.setFrame(desiredFrame, display: true)
         window.center()
         window.makeKeyAndOrderFront(nil)
+        window.setFrame(desiredFrame, display: true)
+    }
 
-        wireLibrary()
+    /// Put the window back to a usable size, and remember where the user put it.
+    ///
+    /// The frame is stored by hand rather than by `setFrameAutosaveName`,
+    /// because AppKit's autosave will happily restore a frame that is far
+    /// too small — and will happily save one, too. Only a frame that is big
+    /// enough to be useful is ever written or read.
+    private static func restoreUsableFrame(_ window: NSWindow, minimum: NSSize) -> NSRect {
+        let defaults = UserDefaults.standard
+        let key = "SlothSuite.windowFrame"
+
+        let screen = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
+        let fallback = NSRect(x: 0, y: 0,
+                              width: min(1320, screen.width),
+                              height: min(880, screen.height))
+
+        guard let saved = defaults.string(forKey: key) else {
+            window.setContentSize(fallback.size)
+            window.center()
+            Log.shared.write("window frame — using the default size")
+            return window.frame
+        }
+
+        let stored = NSRectFromString(saved)
+        guard stored.width >= minimum.width,
+              stored.height >= minimum.height else {
+            window.setContentSize(fallback.size)
+            window.center()
+            Log.shared.write("window frame — using the default size")
+            return window.frame
+        }
+
+        window.setFrame(stored, display: true)
+        Log.shared.write("window frame — restored \(Int(stored.width))×\(Int(stored.height))")
+        return stored
+    }
+
+    /// Remember the window's size, but only when it is worth remembering.
+    private func saveWindowFrame() {
+        let minimum = NSSize(width: 1000, height: 680)
+        let frame = window.frame
+        guard frame.width >= minimum.width, frame.height >= minimum.height else { return }
+        UserDefaults.standard.set(NSStringFromRect(frame), forKey: "SlothSuite.windowFrame")
     }
 
     private func wireLibrary() {
-        sidebar.library().onOpen = { [weak self] id in
-            self?.openDocument(id)
+        library.onChange = { [weak self] documents in
+            self?.libraryView.update(documents: documents)
+            self?.refreshContinueButton()
         }
-        sidebar.library().onDelete = { [weak self] id, title in
-            self?.confirmDelete(id: id, title: title)
+
+        // Favourites and read state live in the suite's own store, so the
+        // library and the notes have to redraw whenever they change.
+        LearningStore.shared.onChange = { [weak self] in
+            guard let self else { return }
+            self.libraryView.update(documents: LibraryStore.shared.filtered)
+            self.notesView.show(notes: LearningStore.shared.allNotes)
+            self.refreshContinueButton()
+            self.updateWindowTitle()
         }
+    }
+
+    /// Show the "continue reading" shortcut when there is something to
+    /// continue, and hide it when there is not.
+    private func refreshContinueButton() {
+        guard let id = LearningStore.shared.lastReadDocumentId,
+              let document = LibraryStore.shared.document(id: id) else {
+            libraryView.setContinue(title: nil)
+            return
+        }
+        libraryView.setContinue(title: document.title)
+    }
+
+    // MARK: - Toolbar
+
+    private func buildToolbar() {
+        let toolbar = NSToolbar(identifier: "SlothSuiteToolbar")
+        toolbar.delegate = self
+        toolbar.displayMode = .iconOnly
+        toolbar.allowsUserCustomization = false
+        window.toolbar = toolbar
+        window.toolbarStyle = .unified
+    }
+
+    // MARK: - Modules
+
+    /// Switch between the parts of the suite.
+    private func showModule(_ id: String) {
+        guard let module = SuiteModules.module(id: id), module.isAvailable else { return }
+        currentModule = id
+
+        libraryView.isHidden = (id != "library")
+        readerView.isHidden = (id != "reader")
+        notesView.isHidden = (id != "notes")
+        webContainer.isHidden = (id != "app")
+
+        switch module.kind {
+        case .library:
+            break
+
+        case .reader:
+            showReader()
+
+        case .notes:
+            notesView.show(notes: LearningStore.shared.allNotes)
+
+        case .app:
+            for (appId, webView) in webViews {
+                webView.isHidden = (appId != current.id)
+            }
+            loadIfNeeded(current)
+
+        case .planned:
+            break
+        }
+
+        sidebar.setSelectedModule(id: id)
+        updateWindowTitle()
+        UserDefaults.standard.set(id, forKey: lastModuleKey)
+    }
+
+    /// The reader shows whatever was last open; if there is nothing yet, it
+    /// says so rather than sitting on a blank page.
+    private func showReader() {
+        guard let id = LearningStore.shared.lastReadDocumentId,
+              let document = LibraryStore.shared.document(id: id) else {
+            readerView.showUnavailable(message: "Pick a document from the Library to read its briefing.")
+            return
+        }
+        renderBriefing(for: document)
+    }
+
+    /// Put a document's briefing into the reader.
+    private func renderBriefing(for document: LibraryDocument) {
+        openDocumentId = document.id
+
+        // Already fetched once — render it straight away.
+        if let briefing = BriefingStore.shared.briefing(documentId: document.id) {
+            readerView.show(briefing: briefing)
+            return
+        }
+
+        readerView.showLoading(title: document.title)
+        BriefingStore.shared.load(documentId: document.id,
+                                  spec: specs.first(where: { $0.supportsLibrary })) { [weak self] briefing in
+            guard let self else { return }
+            guard let briefing else {
+                self.readerView.showUnavailable(
+                    message: "The briefing for “\(document.title)” is not ready yet. "
+                           + "It appears as soon as the synthesis finishes."
+                )
+                return
+            }
+            self.readerView.show(briefing: briefing)
+        }
+    }
+
+    private func updateWindowTitle() {
+        switch currentModule {
+        case "library":
+            window.title = "Sloth Suite"
+            window.subtitle = "\(LibraryStore.shared.documents.count) documents"
+        case "reader":
+            window.title = "Sloth Suite — Reader"
+            window.subtitle = currentReaderTitle
+        case "notes":
+            window.title = "Sloth Suite — Notes"
+            window.subtitle = "\(LearningStore.shared.allNotes.count) notes"
+        case "app":
+            window.title = "Sloth Suite — \(current.title)"
+            window.subtitle = current.tagline
+        default:
+            window.title = "Sloth Suite"
+            window.subtitle = ""
+        }
+    }
+
+    /// The title of the document open in the reader, if there is one.
+    private var currentReaderTitle: String {
+        guard let id = openDocumentId,
+              let document = LibraryStore.shared.document(id: id) else { return "Nothing open" }
+        return document.title
     }
 
     // MARK: - Menu
@@ -257,19 +786,32 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
 
         let fileMenuItem = NSMenuItem()
         let fileMenu = NSMenu(title: "File")
-        fileMenu.addItem(withTitle: "Add a Book…", action: #selector(addBook), keyEquivalent: "o")
+        fileMenu.addItem(withTitle: "Add a Document…", action: #selector(addDocument), keyEquivalent: "o")
+        fileMenu.addItem(withTitle: "New Note…", action: #selector(newNote), keyEquivalent: "n")
+        fileMenu.addItem(withTitle: "Continue Reading…", action: #selector(continueReadingAction), keyEquivalent: "")
+        fileMenu.addItem(.separator())
         fileMenu.addItem(withTitle: "Export as Separate Files…", action: #selector(exportFiles), keyEquivalent: "e")
+        fileMenu.addItem(.separator())
+        fileMenu.addItem(withTitle: "All Audio…", action: #selector(speakOpenDocument), keyEquivalent: "s")
+        fileMenu.addItem(withTitle: "Audio and Chapters…", action: #selector(openAudioWindow), keyEquivalent: "")
         fileMenuItem.submenu = fileMenu
         mainMenu.addItem(fileMenuItem)
 
         let viewMenuItem = NSMenuItem()
         let viewMenu = NSMenu(title: "View")
-        for (index, spec) in specs.enumerated() {
-            let item = viewMenu.addItem(withTitle: spec.title, action: #selector(selectFromMenu(_:)), keyEquivalent: "\(index + 1)")
-            item.tag = index
+        for (index, module) in SuiteModules.all.enumerated() where module.isAvailable {
+            let item = viewMenu.addItem(withTitle: module.title,
+                                       action: #selector(selectModuleFromMenu(_:)),
+                                       keyEquivalent: index < 9 ? "\(index + 1)" : "")
+            item.representedObject = module.id
+            item.keyEquivalentModifierMask = [.command]
         }
         viewMenu.addItem(.separator())
         viewMenu.addItem(withTitle: "Command Palette…", action: #selector(showCommandPalette), keyEquivalent: "k")
+        viewMenu.addItem(withTitle: "Find in Briefing…", action: #selector(findInBriefing), keyEquivalent: "f")
+        viewMenu.addItem(withTitle: "Focus Library Search", action: #selector(focusLibrarySearch), keyEquivalent: "l")
+        viewMenu.addItem(withTitle: "Keyboard Shortcuts…", action: #selector(showShortcutSheet), keyEquivalent: "")
+        viewMenu.addItem(.separator())
         viewMenu.addItem(withTitle: "Toggle Sidebar", action: #selector(toggleSidebar), keyEquivalent: "\\")
         viewMenu.addItem(.separator())
         viewMenu.addItem(withTitle: "Reload", action: #selector(reloadPage), keyEquivalent: "r")
@@ -282,21 +824,19 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
         NSApp.mainMenu = mainMenu
     }
 
+    @objc private func selectModuleFromMenu(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? String else { return }
+        showModule(id)
+    }
+
     // MARK: - Selection
 
     private func select(_ spec: AppSpec) {
         current = spec
-
         for (id, webView) in webViews {
             webView.isHidden = (id != spec.id)
         }
-
-        // The window title used to be hardcoded to "Sloth Suite" in both
-        // places it was set, so it never told you which app you were in.
-        window.title = "Sloth Suite — \(spec.title)"
-        window.subtitle = spec.tagline
-        sidebar.setSelected(id: spec.id)
-
+        updateWindowTitle()
         loadIfNeeded(spec)
     }
 
@@ -311,22 +851,26 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
         Log.shared.write("loaded \(spec.id) — \(spec.url.absoluteString)")
     }
 
-    @objc private func selectFromMenu(_ sender: NSMenuItem) {
-        guard specs.indices.contains(sender.tag) else { return }
-        select(specs[sender.tag])
-    }
-
     // MARK: - Stack supervision
 
     /// Start the stack only for the services that are genuinely down.
     private func startStackIfNeeded() {
-        guard stackManager.scriptAvailable else {
-            Log.shared.write("stack script missing at \(stackManager.scriptURL.path)")
-            sidebar.setStack("Stack: script missing")
-            presentError(title: "Stack script not found",
-                         message: "Expected the stack script at:\n\(stackManager.scriptURL.path)\n\n"
-                            + "Set the path in:\n\(SuiteConfig.configFileURL.path)")
-            return
+        if !stackManager.scriptAvailable {
+            // The configured path may simply be stale — a moved project, a
+            // different account. Try the well-known location before telling
+            // the user to go and edit a config file.
+            if stackManager.recoverScriptPath() {
+                Log.shared.write("recovered the stack script path to \(stackManager.scriptURL.path)")
+                config.stackScript = stackManager.scriptURL.path
+                config.save()
+            } else {
+                Log.shared.write("stack script missing at \(stackManager.scriptURL.path)")
+                sidebar.setStatus("Stack script not found")
+                presentError(title: "Stack script not found",
+                             message: "Expected the stack script at:\n\(stackManager.scriptURL.path)\n\n"
+                                + "It was looked for in your Projects folder too. Set the path in:\n\(SuiteConfig.configFileURL.path)")
+                return
+            }
         }
 
         let down = config.services.filter { service in
@@ -347,9 +891,6 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
     }
 
     /// A service that was answering has stopped answering.
-    ///
-    /// The original app started the stack once at launch and then never
-    /// again, so a backend that died ten minutes later stayed dead.
     private func serviceWentDown(_ appId: String) {
         guard let spec = config.app(id: appId),
               let service = config.service(id: spec.service) else { return }
@@ -360,7 +901,7 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
             guard let self else { return }
             self.stackManager.restart(service: service) { up in
                 DispatchQueue.main.async {
-                    self.sidebar.setStack(up ? "Stack: running" : "Stack: degraded")
+                    self.sidebar.setStatus(up ? "Stack running" : "Stack degraded")
                     if up, self.current.id == appId {
                         self.reloadActivePage()
                     }
@@ -385,55 +926,54 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
     // MARK: - Health
 
     private func applyHealth(id: String, status: HealthMonitor.Status) {
-        sidebar.update(status: status, for: id)
-
         let all = health.allStatuses
         let allUp = !all.isEmpty && specs.allSatisfy { all[$0.id]?.ok == true }
-        sidebar.setStack(allUp ? "Stack: running" : "Stack: starting…")
+        let model = specs.compactMap { all[$0.id]?.ok == true ? all[$0.id]?.model : nil }.first ?? "offline"
 
-        let models = specs.compactMap { all[$0.id]?.ok == true ? all[$0.id]?.model : nil }
-        sidebar.setAI(models.isEmpty ? "Local AI: offline" : "Local AI: " + models.joined(separator: ", "))
-
-        if let enabled = specs.compactMap({ all[$0.id]?.webEnabled }).first {
-            webAccessEnabled = enabled
-            sidebar.setWeb(enabled)
-        }
+        var parts: [String] = []
+        parts.append(allUp ? "Stack running" : "Stack starting")
+        parts.append(model)
+        if let web = webAccessEnabled { parts.append(web ? "Web on" : "Web off") }
+        sidebar.setStatus(parts.joined(separator: " · "))
     }
 
     // MARK: - Actions
 
     private func handle(_ action: SidebarView.SidebarAction) {
         switch action {
-        case .addBook: addBook()
-        case .exportFiles: exportFiles()
+        case .addDocument: addDocument()
+        case .newNote: startNote(forDocumentId: "", title: "")
+        case .continueReading: continueReading()
+        case .exportFiles: performExport(document: nil)
+        case .speak: speakSummary(for: nil)
+        case .allAudio: speakOpenDocument()
+        case .audioChapters: openAudioWindow()
         case .restartStack: restartStack()
         case .reloadPage: reloadPage()
         case .showLogs: showLogs()
         case .copyDiagnostics: copyDiagnostics()
         case .toggleWeb: toggleWebAccess()
-        case .speak: speakSummary()
         case .setProvider(let provider): setProvider(provider)
-        case .openDocument(let id): openDocument(id)
+        case .openDocument(let id): openDocument(id: id)
         case .deleteDocument(let id, let title): confirmDelete(id: id, title: title)
         }
     }
 
-    @objc private func addBook() {
+    @objc private func addDocument() {
         guard let spec = specs.first(where: { $0.supportsLibrary }) else {
             presentError(title: "No library", message: "This build has no app that accepts documents.")
             return
         }
 
-        // Switch to the reader first, then trigger its own file input so the
+        // Switch to the app first, then trigger its own file input so the
         // real upload handler runs rather than a side-loaded request.
+        showModule("app")
         if current.id != spec.id {
             select(spec)
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
-                self?.triggerAddBook()
-            }
-            return
         }
-        triggerAddBook()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+            self?.triggerAddBook()
+        }
     }
 
     private func triggerAddBook() {
@@ -453,14 +993,11 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
         }
     }
 
-    /// A file dropped on the window goes straight to the reader.
+    /// A file dropped on the window goes straight to the app.
     private func importDroppedFile(_ url: URL) {
         guard let spec = specs.first(where: { $0.supportsLibrary }) else { return }
         Log.shared.write("dropped \(url.lastPathComponent)")
-
-        if current.id != spec.id {
-            select(spec)
-        }
+        showModule("app")
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
             self?.uploadDirectly(url, spec: spec)
         }
@@ -496,7 +1033,7 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
                 if (200..<300).contains(code) {
                     Log.shared.write("imported \(filename)")
                     self.reloadActivePage()
-                    self.reloadLibrary()
+                    self.library.refresh(spec: spec)
                 } else {
                     let detail = (data.flatMap { JSONTools.dictionary(from: $0)?["detail"] as? String }) ?? "HTTP \(code)"
                     self.presentError(title: "Could not import that file", message: detail)
@@ -507,12 +1044,32 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
 
     // MARK: - Export as separate files
 
+    /// Menu and toolbar entry point.
     @objc private func exportFiles() {
+        performExport(document: nil)
+    }
+
+    private func performExport(document: LibraryDocument?) {
         guard let spec = specs.first(where: { $0.supportsLibrary }) else { return }
+
+        // A specific document — from the reader, or from a card's menu — is
+        // exported straight from the backend. The page's own view is only
+        // used when nothing specific was asked for, because the page may be
+        // showing a different document from the one the user means.
+        let target = document
+            ?? openDocumentId.flatMap { LibraryStore.shared.document(id: $0) }
+
+        if let target {
+            fetchBundleFromBackend(spec: spec, document: target)
+            return
+        }
 
         // Prefer the page's own view of the document, so the export matches
         // what is on screen; fall back to the backend's bundle endpoint.
-        guard let bridge = bridges[spec.id], let webView = webViews[spec.id] else { return }
+        guard let bridge = bridges[spec.id], let webView = webViews[spec.id] else {
+            fetchBundleFromBackend(spec: spec, document: nil)
+            return
+        }
 
         bridge.perform("exportBundle", in: webView) { [weak self] result in
             switch result {
@@ -524,23 +1081,27 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
                               let content = entry["content"] as? String else { return nil }
                         return Exporter.File(name: name, content: content)
                     }
-                    let title = (dict["title"] as? String) ?? "Briefing"
+                    let title = (dict["title"] as? String) ?? document?.title ?? "Briefing"
                     self?.writeExport(mapped, title: title)
                     return
                 }
-                self?.fetchBundleFromBackend(spec: spec)
+                self?.fetchBundleFromBackend(spec: spec, document: document)
             case .failure(_), .unsupported(_):
-                self?.fetchBundleFromBackend(spec: spec)
+                self?.fetchBundleFromBackend(spec: spec, document: document)
             }
         }
     }
 
-    private func fetchBundleFromBackend(spec: AppSpec) {
+    private func fetchBundleFromBackend(spec: AppSpec, document: LibraryDocument?) {
         guard let base = spec.apiBase else { return }
-        var request = URLRequest(url: base.appendingPathComponent("/api/documents"))
-        request.timeoutInterval = 5
 
-        URLSession.shared.dataTask(with: request) { [weak self] data, _, error in
+        let makeRequest: (String) -> URLRequest = { path in
+            var request = URLRequest(url: base.appendingPathComponent(path))
+            request.timeoutInterval = 15
+            return request
+        }
+
+        URLSession.shared.dataTask(with: makeRequest("/api/documents")) { [weak self] data, _, error in
             guard let self else { return }
             guard error == nil,
                   let data = data,
@@ -553,8 +1114,9 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
                 return
             }
 
-            guard let docId = documents.first(where: { ($0["status"] as? String) == "completed" })?["doc_id"] as? String
-            else {
+            let docId = document?.id
+                ?? documents.first(where: { ($0["status"] as? String) == "completed" })?["doc_id"] as? String
+            guard let docId else {
                 DispatchQueue.main.async {
                     self.presentError(title: "Nothing to export",
                                       message: "There is no completed briefing to export yet.")
@@ -562,9 +1124,7 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
                 return
             }
 
-            var bundleRequest = URLRequest(url: base.appendingPathComponent("/api/documents/\(docId)/bundle"))
-            bundleRequest.timeoutInterval = 15
-            URLSession.shared.dataTask(with: bundleRequest) { bundleData, _, bundleError in
+            URLSession.shared.dataTask(with: makeRequest("/api/documents/\(docId)/bundle")) { bundleData, _, bundleError in
                 DispatchQueue.main.async {
                     guard bundleError == nil,
                           let bundleData = bundleData,
@@ -600,8 +1160,51 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
 
     // MARK: - Speak the summary
 
-    /// Speak the current briefing using the Mac's own voice.
-    private func speakSummary() {
+    /// Speak arbitrary text with the Mac's own voice.
+    ///
+    /// Used by the reader, which speaks a chapter or the whole briefing, and
+    /// by anything else that has text rather than a stored audio script.
+    private func speakText(_ text: String, title: String) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            presentError(title: "Nothing to read aloud",
+                         message: "“\(title)” has no text to speak.")
+            return
+        }
+
+        MacServices.shared.status { [weak self] status in
+            guard let self else { return }
+            guard status.reachable, status.speech else {
+                self.presentError(title: "The Mac voice is not available",
+                                  message: "Start Sloth Suite from the Applications folder so the Mac service can run.")
+                return
+            }
+
+            DispatchQueue.main.async {
+                self.setDockBadge("🔊")
+                AudioPlayer.shared.speak(trimmed, label: title)
+            }
+        }
+    }
+
+    /// Read every chapter of the open briefing, one after another.
+    private func speakEverything(_ briefing: Briefing) {
+        let texts = briefing.chapters.map { chapter in
+            chapter.audioScript.isEmpty ? chapter.spokenText : chapter.audioScript
+        }
+        let labels = briefing.chapters.enumerated().map { "Chapter \($0.offset + 1)" }
+
+        guard !texts.isEmpty else {
+            speakText(briefing.plainText, title: briefing.title)
+            return
+        }
+
+        setDockBadge("🔊")
+        AudioPlayer.shared.speakAll(texts, labels: labels)
+    }
+
+    /// Speak a briefing using the Mac's own voice.
+    private func speakSummary(for document: LibraryDocument?) {
         guard let spec = specs.first(where: { $0.supportsLibrary }), let base = spec.apiBase else { return }
 
         MacServices.shared.status { [weak self] status in
@@ -617,9 +1220,17 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
             URLSession.shared.dataTask(with: request) { data, _, _ in
                 guard let data = data,
                       let json = JSONTools.dictionary(from: data),
-                      let documents = json["documents"] as? [[String: Any]],
-                      let docId = documents.first(where: { ($0["status"] as? String) == "completed" })?["doc_id"] as? String
-                else {
+                      let documents = json["documents"] as? [[String: Any]] else {
+                    DispatchQueue.main.async {
+                        self.presentError(title: "Nothing to speak",
+                                          message: "The library could not be read.")
+                    }
+                    return
+                }
+
+                let docId = document?.id
+                    ?? documents.first(where: { ($0["status"] as? String) == "completed" })?["doc_id"] as? String
+                guard let docId else {
                     DispatchQueue.main.async {
                         self.presentError(title: "Nothing to speak",
                                           message: "There is no completed briefing yet.")
@@ -642,7 +1253,6 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
 
                     let script = chapters.compactMap { $0["audio_script"] as? String }
                         .filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
-                        .joined(separator: " ")
 
                     guard !script.isEmpty else {
                         DispatchQueue.main.async {
@@ -653,16 +1263,11 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
                     }
 
                     DispatchQueue.main.async {
+                        // The queue plays the chapters one after another
+                        // rather than reading them all at once.
+                        let labels = script.enumerated().map { "Chapter \($0.offset + 1)" }
                         self.setDockBadge("🔊")
-                        MacServices.shared.speak(text: script) { result in
-                            DispatchQueue.main.async {
-                                self.setDockBadge(nil)
-                                if case .failure(let error) = result {
-                                    self.presentError(title: "Could not speak the summary",
-                                                      message: error.localizedDescription)
-                                }
-                            }
-                        }
+                        AudioPlayer.shared.speakAll(script, labels: labels)
                     }
                 }.resume()
             }.resume()
@@ -721,7 +1326,7 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
             DispatchQueue.main.async {
                 self.aiProvider = provider
                 self.macModelAvailable = macReachable
-                self.sidebar.setProvider(provider, macAvailable: macReachable)
+                self.sidebar.setProvider(provider == "mac" ? "Mac model" : "Ollama")
             }
         }.resume()
 
@@ -729,16 +1334,13 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.macModelAvailable = status.reachable && status.foundationModels == "available"
-                self.sidebar.setMacModel(status.foundationModels == "available"
-                                          ? "Mac model: ready" : "Mac model: unavailable")
-                self.sidebar.setProvider(self.aiProvider, macAvailable: self.macModelAvailable)
+                self.sidebar.setProvider(self.aiProvider == "mac" ? "Mac model" : "Ollama")
             }
         }
     }
 
     // MARK: - Web access
 
-    /// Turn web lookups on or off for the backend.
     private func toggleWebAccess() {
         let target = !(webAccessEnabled ?? false)
         guard let spec = specs.first, let base = spec.apiBase else { return }
@@ -753,7 +1355,6 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
             DispatchQueue.main.async {
                 guard let self else { return }
                 if let error {
-                    Log.shared.write("web toggle failed: \(error.localizedDescription)")
                     self.presentError(title: "Could not change the web setting",
                                       message: error.localizedDescription)
                     return
@@ -765,26 +1366,96 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
                     return
                 }
                 self.webAccessEnabled = target
-                self.sidebar.setWeb(target)
+                self.applyHealth(id: spec.id, status: self.health.status(for: spec.id))
             }
         }.resume()
     }
 
     // MARK: - Library
 
-    private func openDocument(_ docId: String) {
+    private func openDocument(_ document: LibraryDocument) {
+        openDocument(id: document.id)
+    }
+
+    /// Open a document in the native reader.
+    ///
+    /// The briefing is fetched from the backend and rendered natively, so the
+    /// reader works even when the wrapped app is not running.
+    private func openDocument(id: String) {
+        guard LibraryStore.shared.document(id: id) != nil else { return }
+
+        openDocumentId = id
+        // The reader picks up whatever was last opened, so the order matters:
+        // remember it first, then switch.
+        LearningStore.shared.markReading(documentId: id)
+        showModule("reader")
+        updateWindowTitle()
+    }
+
+    /// Open a document in the wrapped web app instead of the native reader.
+    private func openInApp(documentId: String) {
         guard let spec = specs.first(where: { $0.supportsLibrary }) else { return }
-        select(spec)
+        showModule("app")
+        if current.id != spec.id { select(spec) }
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
             guard let self,
                   let bridge = self.bridges[spec.id],
                   let webView = self.webViews[spec.id] else { return }
-            bridge.perform("openDocument", payload: ["id": docId], in: webView) { result in
+            bridge.perform("openDocument", payload: ["id": documentId], in: webView) { result in
                 if case .failure(let message) = result {
                     self.presentError(title: "Could not open that document", message: message)
                 }
             }
         }
+    }
+
+    /// Resume the last document that was being read.
+    private func continueReading() {
+        guard let id = LearningStore.shared.lastReadDocumentId else {
+            presentError(title: "Nothing to continue",
+                         message: "You have not opened a document yet.")
+            return
+        }
+        openDocument(id: id)
+    }
+
+    // MARK: - Notes
+
+    private func startNote(for document: LibraryDocument) {
+        startNote(forDocumentId: document.id, title: document.title)
+    }
+
+    /// Create a note and open it in the notes module.
+    private func startNote(forDocumentId id: String, title: String) {
+        let note = LearningStore.shared.addNote(documentId: id, documentTitle: title)
+        showModule("notes")
+        notesView.show(notes: LearningStore.shared.allNotes)
+        notesView.select(noteId: note.id)
+    }
+
+    private func filterNotes(_ query: String) {
+        let needle = query.trimmingCharacters(in: .whitespaces).lowercased()
+        let all = LearningStore.shared.allNotes
+        guard !needle.isEmpty else {
+            notesView.show(notes: all)
+            return
+        }
+        notesView.show(notes: all.filter { note in
+            "\(note.documentTitle) \(note.body)".lowercased().contains(needle)
+        })
+    }
+
+    private func confirmDeleteNote(_ note: StudyNote) {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Delete this note?"
+        alert.informativeText = "The note is removed from this machine. This cannot be undone."
+        alert.addButton(withTitle: "Delete")
+        alert.addButton(withTitle: "Cancel")
+
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        LearningStore.shared.deleteNote(id: note.id)
+        notesView.show(notes: LearningStore.shared.allNotes)
     }
 
     private func confirmDelete(id: String, title: String) {
@@ -812,7 +1483,7 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
                 }
                 let code = (response as? HTTPURLResponse)?.statusCode ?? 0
                 if (200..<300).contains(code) {
-                    self.reloadLibrary()
+                    self.library.refresh(spec: spec)
                 } else {
                     self.presentError(title: "Could not remove that document",
                                       message: "The backend answered HTTP \(code).")
@@ -821,15 +1492,50 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
         }.resume()
     }
 
-    private func reloadLibrary() {
-        guard let spec = specs.first(where: { $0.supportsLibrary }) else { return }
-        sidebar.library().reload(spec: spec)
-    }
-
     // MARK: - Commands
 
+    @objc private func newNote() {
+        startNote(forDocumentId: "", title: "")
+    }
+
+    @objc private func continueReadingAction() {
+        continueReading()
+    }
+
+    /// Speak whatever is open in the reader.
+    @objc private func speakOpenDocument() {
+        guard let id = openDocumentId,
+              let briefing = BriefingStore.shared.briefing(documentId: id) else {
+            speakSummary(for: nil)
+            return
+        }
+        speakEverything(briefing)
+    }
+
+    /// Open the pop-out window with every chapter and its spoken script.
+    @objc private func openAudioWindow() {
+        guard let id = openDocumentId,
+              let briefing = BriefingStore.shared.briefing(documentId: id) else {
+            presentError(title: "No document open",
+                         message: "Open a document from the Library first.")
+            return
+        }
+        AudioWindowController.shared.show(briefing: briefing)
+    }
+
+    /// Open the reader's own find bar.
+    @objc private func findInBriefing() {
+        showModule("reader")
+        readerView.focusFindBar()
+    }
+
+    /// Put the cursor in the library's search field.
+    @objc private func focusLibrarySearch() {
+        showModule("library")
+        libraryView.focusSearch()
+    }
+
     @objc private func restartStack() {
-        sidebar.setStack("Stack: restarting…")
         stackManager.run(action: "stop")
         // Wait for the ports to actually be released before starting again,
         // instead of sleeping for a fixed interval and racing the cleanup.
@@ -840,7 +1546,7 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
                 self.stackManager.run(action: "start")
                 DispatchQueue.main.asyncAfter(deadline: .now() + 10) {
                     self.reloadActivePage()
-                    self.sidebar.setStack("Stack: running")
+                    self.library.refresh(spec: self.specs.first(where: { $0.supportsLibrary }))
                 }
             }
         }
@@ -848,6 +1554,7 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
 
     @objc private func reloadPage() {
         reloadActivePage()
+        library.refresh(spec: specs.first(where: { $0.supportsLibrary }))
     }
 
     @objc private func showLogs() {
@@ -857,8 +1564,6 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
     }
 
     /// Copy a diagnostics bundle to the clipboard.
-    ///
-    /// Everything needed to work out why something is broken, in one paste.
     @objc private func copyDiagnostics() {
         var lines: [String] = []
         lines.append("Sloth Suite diagnostics — \(ISO8601DateFormatter().string(from: Date()))")
@@ -900,28 +1605,48 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
     @objc private func showCommandPalette() {
         var commands: [CommandPalette.Command] = []
 
-        for spec in specs {
+        for module in SuiteModules.all where module.isAvailable {
+            let subtitle: String
+            switch module.kind {
+            case .library: subtitle = "Your documents"
+            case .reader: subtitle = "Read a briefing"
+            case .notes: subtitle = "Notes you have written"
+            case .app: subtitle = current.tagline
+            case .planned: subtitle = ""
+            }
             commands.append(CommandPalette.Command(
-                title: "Switch to \(spec.title)",
-                subtitle: spec.tagline
+                title: "Go to \(module.title)",
+                subtitle: subtitle
             ) { [weak self] in
-                self?.select(spec)
+                self?.showModule(module.id)
             })
         }
 
-        commands.append(CommandPalette.Command(title: "Add a book…") { [weak self] in
-            self?.addBook()
+        commands.append(CommandPalette.Command(title: "Add a document…") { [weak self] in
+            self?.addDocument()
+        })
+        commands.append(CommandPalette.Command(title: "New note…") { [weak self] in
+            self?.startNote(forDocumentId: "", title: "")
+        })
+        commands.append(CommandPalette.Command(title: "Continue reading…") { [weak self] in
+            self?.continueReading()
         })
         commands.append(CommandPalette.Command(title: "Export as separate files…") { [weak self] in
-            self?.exportFiles()
+            self?.performExport(document: nil)
+        })
+        commands.append(CommandPalette.Command(title: "Read everything aloud") { [weak self] in
+            self?.speakOpenDocument()
+        })
+        commands.append(CommandPalette.Command(title: "Audio and chapters…") { [weak self] in
+            self?.openAudioWindow()
         })
         commands.append(CommandPalette.Command(title: "Speak the summary with the Mac") { [weak self] in
-            self?.speakSummary()
+            self?.speakSummary(for: nil)
         })
         commands.append(CommandPalette.Command(title: "Restart the stack") { [weak self] in
             self?.restartStack()
         })
-        commands.append(CommandPalette.Command(title: "Reload the page") { [weak self] in
+        commands.append(CommandPalette.Command(title: "Reload") { [weak self] in
             self?.reloadPage()
         })
         commands.append(CommandPalette.Command(title: "Show the log folder") { [weak self] in
@@ -932,6 +1657,9 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
         })
         commands.append(CommandPalette.Command(title: "Toggle the sidebar") { [weak self] in
             self?.toggleSidebar()
+        })
+        commands.append(CommandPalette.Command(title: "Keyboard shortcuts") { [weak self] in
+            self?.showShortcutSheet()
         })
         commands.append(CommandPalette.Command(
             title: aiProvider == "mac" ? "Use Ollama for AI" : "Use the Mac model for AI"
@@ -944,7 +1672,75 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
             self?.toggleWebAccess()
         })
 
-        CommandPalette.show(commands: commands)
+        // The provider is asked again on every keystroke, so the palette
+        // searches the library and the notes as they are right now.
+        CommandPalette.show(commands: commands) { [weak self] query in
+            guard let self else { return commands }
+            return commands + self.searchResults(for: query)
+        }
+    }
+
+    /// Documents and notes that match the palette's query.
+    private func searchResults(for query: String) -> [CommandPalette.Command] {
+        let needle = query.trimmingCharacters(in: .whitespaces).lowercased()
+        guard !needle.isEmpty else { return [] }
+
+        var results: [CommandPalette.Command] = []
+
+        for document in LibraryStore.shared.documents {
+            let haystack = "\(document.title) \(document.author) \(document.filename)".lowercased()
+            guard haystack.contains(needle) else { continue }
+            results.append(CommandPalette.Command(
+                title: document.title,
+                subtitle: document.author.isEmpty ? document.filename : document.author
+            ) { [weak self] in
+                self?.openDocument(id: document.id)
+            })
+        }
+
+        for note in LearningStore.shared.allNotes {
+            let haystack = "\(note.documentTitle) \(note.body)".lowercased()
+            guard haystack.contains(needle) else { continue }
+            results.append(CommandPalette.Command(
+                title: note.preview.isEmpty ? "(empty note)" : note.preview,
+                subtitle: note.documentTitle.isEmpty ? "Note" : "Note — \(note.documentTitle)"
+            ) { [weak self] in
+                self?.openNote(note)
+            })
+        }
+
+        return results
+    }
+
+    /// Show a note in the notes module.
+    private func openNote(_ note: StudyNote) {
+        showModule("notes")
+        notesView.show(notes: LearningStore.shared.allNotes)
+        notesView.select(noteId: note.id)
+    }
+
+    /// A short sheet of the keyboard shortcuts.
+    @objc private func showShortcutSheet() {
+        let rows: [(String, String)] = [
+            ("⌘K", "Open the command palette"),
+            ("⌘1 – ⌘5", "Switch between Library, Reader, Notes, Review and App"),
+            ("⌘L", "Focus the library search"),
+            ("⌘F", "Find in the open briefing"),
+            ("⌘N", "New note"),
+            ("⌘O", "Add a document"),
+            ("⌘E", "Export as separate files"),
+            ("⌘S", "Speak the open briefing"),
+            ("⌘\\", "Show or hide the sidebar"),
+            ("⌘R", "Reload the app"),
+            ("⌘D", "Copy diagnostics")
+        ]
+
+        let alert = NSAlert()
+        alert.messageText = "Keyboard shortcuts"
+        alert.informativeText = rows.map { "\($0.0)\t\($0.1)" }.joined(separator: "\n")
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "Done")
+        alert.runModal()
     }
 
     @objc private func toggleSidebar() {
@@ -962,11 +1758,9 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
             if SMAppService.mainApp.status == .enabled {
                 try SMAppService.mainApp.unregister()
                 sender.state = .off
-                Log.shared.write("open at login disabled")
             } else {
                 try SMAppService.mainApp.register()
                 sender.state = .on
-                Log.shared.write("open at login enabled")
             }
         } catch {
             presentError(title: "Could not change the login item",
@@ -990,10 +1784,10 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
             return
         }
 
-        // A long synthesis can finish while the user is in the other app.
         guard name == "synthesisComplete" || name == "planReady" else { return }
         let title = (data["title"] as? String) ?? "Your document"
         notify(title: title, body: "Ready in the app.")
+        library.refresh(spec: specs.first(where: { $0.supportsLibrary }))
     }
 
     private func notify(title: String, body: String) {
@@ -1041,7 +1835,6 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
 
     var specsForTest: [AppSpec] { specs }
     var windowForTest: NSWindow? { window }
-    var sidebarForTest: SidebarView? { sidebar }
     var healthForTest: HealthMonitor { health }
     var stackForTest: StackManager { stackManager }
     var configForTest: SuiteConfig { config }
@@ -1051,14 +1844,13 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
     func bridgeForTest(_ id: String) -> Bridge? { bridges[id] }
 
     func selectForTest(_ spec: AppSpec) { select(spec) }
+    func showModuleForTest(_ id: String) { showModule(id) }
+    func currentModuleForTest() -> String { currentModule }
 
     /// Trigger the reader's own file picker (used by the self-test).
     func triggerAddBookForTest() { triggerAddBook() }
 
     /// Evaluate JavaScript in the active page, reporting back on the main thread.
-    ///
-    /// The self-test is callback-driven end to end: spinning the run loop to
-    /// wait for a result is what let a hung page freeze the whole run.
     func evaluateAsyncForTest(_ script: String, completion: @escaping (Any?) -> Void) {
         guard let webView = webViews[current.id] else {
             completion(nil)
@@ -1128,9 +1920,6 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
         panel.canChooseDirectories = false
         panel.allowsMultipleSelection = parameters.allowsMultipleSelection
         panel.message = "Choose a PDF or EPUB to read"
-        // The page only accepts PDF and EPUB. NSOpenPanel cannot express
-        // "any file, but warn on the wrong one" — so allow all files and let
-        // the app's own validation produce the error message.
         panel.begin { response in
             if response == .OK, let url = panel.url {
                 completionHandler([url])
@@ -1219,8 +2008,7 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
     // MARK: - WKNavigationDelegate
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-        let title = webView.title ?? "(untitled)"
-        Log.shared.write("loaded \(current.id) — \(title)")
+        Log.shared.write("loaded \(current.id) — \(webView.title ?? "(untitled)")")
         refreshProvider()
     }
 
@@ -1256,10 +2044,6 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
     }
 
     // MARK: - Downloads
-    //
-    // The app exports its briefing as a Markdown file via a blob URL and an
-    // `<a download>`. WKWebView silently drops those unless the download
-    // policy is granted and a WKDownloadDelegate is attached.
 
     func webView(_ webView: WKWebView,
                  decidePolicyFor navigationAction: WKNavigationAction,
@@ -1317,5 +2101,59 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
 
     func download(_ download: WKDownload, didFailWithError error: Error, resumeData: Data?) {
         Log.shared.write("download failed: \(error.localizedDescription)")
+    }
+}
+
+// MARK: - Toolbar
+
+extension SuiteController: NSToolbarDelegate {
+    private static let toolbarItems: [(String, String, String)] = [
+        ("add", "plus", "Add Document"),
+        ("note", "note.text.badge.plus", "New Note"),
+        ("audio", "speaker.wave.3", "All Audio"),
+        ("chapters", "list.bullet.rectangle", "Audio and Chapters"),
+        ("export", "square.and.arrow.up", "Export as Separate Files"),
+        ("speak", "waveform", "Speak the Briefing"),
+        ("reload", "arrow.clockwise", "Reload"),
+        ("restart", "arrow.triangle.2.circlepath", "Restart Stack"),
+        ("logs", "doc.text.magnifyingglass", "Show Logs")
+    ]
+
+    func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
+        Self.toolbarItems.map { NSToolbarItem.Identifier($0.0) }
+    }
+
+    func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
+        toolbarDefaultItemIdentifiers(toolbar)
+    }
+
+    func toolbar(_ toolbar: NSToolbar,
+                itemForItemIdentifier identifier: NSToolbarItem.Identifier,
+                willBeInsertedIntoToolbar flag: Bool) -> NSToolbarItem? {
+        guard let entry = Self.toolbarItems.first(where: { $0.0 == identifier.rawValue }) else { return nil }
+
+        let item = NSToolbarItem(itemIdentifier: identifier)
+        item.label = entry.2
+        item.toolTip = entry.2
+        item.image = NSImage(systemSymbolName: entry.1, accessibilityDescription: entry.2)
+        item.target = self
+        item.action = #selector(toolbarAction(_:))
+        item.tag = Self.toolbarItems.firstIndex(where: { $0.0 == identifier.rawValue }) ?? 0
+        return item
+    }
+
+    @objc private func toolbarAction(_ sender: NSToolbarItem) {
+        switch sender.tag {
+        case 0: addDocument()
+        case 1: startNote(forDocumentId: "", title: "")
+        case 2: speakOpenDocument()
+        case 3: openAudioWindow()
+        case 4: performExport(document: nil)
+        case 5: speakOpenDocument()
+        case 6: reloadPage()
+        case 7: restartStack()
+        case 8: showLogs()
+        default: break
+        }
     }
 }

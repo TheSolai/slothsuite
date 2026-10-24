@@ -44,17 +44,43 @@ Sources/SlothSuite/
   StackManager.swift    process control, port probing, service restarts
   HealthMonitor.swift   health polling and status transitions
   Bridge.swift          the command bridge to the wrapped pages
-  Sidebar.swift         app list, library, actions and status read-outs
-  LibraryPanel.swift    native list of ingested documents
+  Modules.swift         the module list, the library model and the library store
+  Sidebar.swift         functional navigation, one menu, one status line
+  LibraryView.swift     the library: a card grid with filters and per-card actions
+  ReaderView.swift      the native reader — a briefing, with find and listen
+  NotesView.swift       the native notes module
+  LearningStore.swift   favourites, read state and notes, stored locally
+  Briefing.swift        the briefing model and its loader
+  Typography.swift      the shared type scale
+  AudioPlayer.swift     plays the synthesised audio, and queues it
+  AudioWindow.swift     the pop-out window: every chapter and its script
   MacServices.swift     manages the bundled mac-service helper
   CommandPalette.swift  the ⌘K palette
   Exporter.swift        writes a briefing out as separate files
   DropView.swift        drag-and-drop document import
-  SuiteController.swift the window, webviews, supervisor and actions
+  SuiteController.swift the window, webviews, modules, supervisor and actions
   SelfTest.swift        assertion-based self-test
 Tools/
   mac-service/          the Mac's own AI services (FoundationModels + AVSpeechSynthesizer)
 ```
+
+### The modules
+
+The suite is a learning desk with five areas, and the sidebar is generated
+from one list in `Modules.swift`:
+
+| module | what it is |
+|---|---|
+| **Library** | every document on this machine, as a card grid |
+| **Reader** | the briefing, rendered natively, with find and listen |
+| **Notes** | notes you wrote, attached to the documents they came from |
+| **Review** | reserved for spaced repetition |
+| **App** | the wrapped SlothRead web app — the synthesis engine |
+
+The native modules do not need the web app running. The reader fetches the
+briefing straight from the backend and renders it itself, and the notes,
+favourites and read state live in
+`~/Library/Application Support/SlothSuite/learning.json`.
 
 ### One webview per app
 
@@ -156,13 +182,17 @@ Two features are built on it:
 
 | shortcut | what it does |
 |---|---|
-| ⌘K | command palette — switch app, import, export, speak, restart, toggle |
-| ⌘\\ | toggle the sidebar |
-| ⌘⇧D | copy a diagnostics bundle (versions, ports, health, log tail) to the clipboard |
+| ⌘K | command palette — switch module, import, export, speak, restart, toggle |
+| ⌘1 – ⌘5 | jump to Library, Reader, Notes, Review, App |
+| ⌘L | search the library |
+| ⌘F | find in the briefing |
+| ⌘N | new note |
 | ⌘O | add a book |
 | ⌘E | export as separate files |
+| ⌘S | read the briefing aloud |
 | ⌘R | reload the page |
-| ⌘1 | switch to the first app |
+| ⌘\\ | toggle the sidebar |
+| ⌘⇧D | copy a diagnostics bundle (versions, ports, health, log tail) to the clipboard |
 
 - **Drag and drop** a PDF or EPUB onto the window to import it straight away.
 - **Library filtering** and a per-document delete button in the sidebar.
@@ -170,6 +200,33 @@ Two features are built on it:
 - **The Dock badge** shows 🔊 while the Mac is speaking and 📋 when
   diagnostics are copied.
 - **The error page** offers "Restart the stack", not just "Try again".
+
+## Audio
+
+The briefing can be read aloud, and the shell is what plays it: the Mac
+service hands back WAV bytes and `AudioPlayer` plays them through
+`AVAudioPlayer`. Before this, the "speak" buttons synthesised a file and
+threw it away, so the suite looked like it could read aloud and could not.
+
+- **Listen** reads the current chapter.
+- **All audio** reads every chapter, one after another, in order.
+- **Chapters** opens a pop-out window with *every* chapter and its full
+  spoken script on one scrollable page, each with its own Play button.
+
+## Inspecting the interface
+
+`screencapture` needs screen-recording permission, which a command-line
+agent does not have. The shell can therefore render itself:
+
+```bash
+./build.sh
+build/Sloth\ Suite.app/Contents/MacOS/SlothSuite --snapshot library:/tmp/library.png
+```
+
+`--snapshot <module>:<path>` shows a module, renders the window to a PNG and
+exits. The modules are `library`, `reader`, `notes`, `app` and `audio` (the
+pop-out audio window). Add `--size 1000x680` to render at the window's
+smallest useful size, which is how the narrow layout is checked.
 
 ## Export as separate files
 

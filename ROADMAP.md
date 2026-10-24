@@ -1,5 +1,142 @@
 # Sloth Suite — roadmap and status
 
+## Phase 4 — the GUI overhaul: a window you can actually use
+
+The complaint was blunt: *"it is tiny and useless"*, then *"looks so poor,
+please greatly improve gui, also fix fonts to more readable"*. Three things
+were wrong, and all three turned out to be the same kind of bug.
+
+### The window came up 573 points wide
+
+Two separate causes, and the second one only showed up after the first was
+fixed.
+
+1. `setFrameAutosaveName` had saved a degenerate frame, and AppKit's
+   autosave restores and saves whatever it is given — `minSize` is not a
+   floor for an autosaved frame. The frame is now managed by hand under
+   `SlothSuite.windowFrame`, and only a frame of at least 1000×680 is ever
+   written or read.
+2. The content view's size was **ambiguous**: the sidebar was pinned to its
+   leading edge and the content to its trailing edge, but nothing said how
+   wide the whole thing was. Auto Layout resolved the ambiguity to the
+   smallest legal size and AppKit resized the window to match. The content
+   view is now pinned to the window's content rect, and kept in step with
+   `NSWindow.didResizeNotification`.
+
+The window now opens at 1320×932, and the narrow layout was checked down to
+the 1000×680 minimum.
+
+### Nothing inside the window was being positioned
+
+The header row rendered as a row of labels piled at the top-left corner, and
+the cards were blank white rectangles. The cause: **a view with Auto Layout
+constraints but `translatesAutoresizingMaskIntoConstraints` left at the
+default `true` keeps its creation-time frame and is never moved by its
+constraints.** `NSTextField(labelWithString:)` — the obvious way to make a
+label — defaults to `true`, so every label in the suite was in that state.
+
+The constraints were being *satisfied*, coincidentally: a label pinned to
+the top-left of a container whose own frame was also at the origin looks
+correct to the solver. Nothing was reported. It only became visible when
+the frames were measured.
+
+What it took to fix it, and what it turned up:
+
+- Every constrained subview now hands over its autoresizing mask, set where
+  the view is created rather than in a class initialiser, because an
+  initialiser cannot see a property that is still `nil` (`addButton` is an
+  implicitly unwrapped optional — touching it before it is set traps).
+- The **editor's header** in the notes module was a local `NSView` that
+  never got the flag, which collapsed the whole header chain and pushed the
+  "no note open" placeholder off the bottom of the pane.
+- The **module views** themselves (`libraryView`, `readerView`, `notesView`)
+  were still on autoresizing: they happened to be the right size, so the bug
+  only showed when the window was resized.
+- The **audio window's script** was a wrapping label whose intrinsic width
+  is the whole unwrapped line — thousands of points — which pushed the
+  window out to 3985 points wide.
+
+### The reader ran every paragraph together
+
+`BriefingTextBuilder` appended each piece of text as a run, but no piece
+ended its paragraph. A heading and the text under it therefore shared one
+paragraph, so the heading's style applied to the whole thing and the two ran
+together on one line: *"EXECUTIVE THESISThe manuscript synthesizes…"*. Every
+piece now ends its own paragraph unless it is a continuation of the same
+one (a list number and its text, a term and its definition).
+
+### Readability
+
+A shared type scale in `Typography.swift` — display 26, title 17, body 13,
+reading 16.5 — applied across the sidebar, library, reader and notes. The
+reading column has a proper measure and generous margins.
+
+### Audio that is audible
+
+The "speak" buttons synthesised a WAV and threw it away. `AudioPlayer` now
+plays the bytes the Mac service returns and queues them, so **All audio**
+reads the chapters one after another. The pop-out window puts every chapter
+and its full spoken script on one scrollable page, each with its own Play
+button.
+
+### The backend was reading the wrong characters
+
+The PDF reader read the raw text operands out of the content stream, which
+for a PDF with a subsetted font gives the *glyph codes* — not text at all,
+but a row of meaningless characters. Every PDF that was not an EPUB had a
+briefing built from noise. The extraction now uses pypdf's decoded-text hook
+and works out each line's position from the combined text and
+transformation matrices.
+
+That also fixed the titles. A file called `Untitled document.pdf`, saved from
+Google Docs, carries that exact string as its title. Generic titles are now
+treated as no title at all, and the real title is taken from the document's
+own opening lines — skipping the address block a letter opens with.
+
+## Phase 3 — the third ten: a learning desk, not a shell
+
+The brief was a redesign: functional buttons, a real library, and the old
+sidebar clutter gone. The suite stopped being a wrapper around one web app
+and became a set of native modules with the app as the engine behind them.
+
+| # | improvement | where |
+|---|---|---|
+| 1 | Native **Reader** — briefings rendered in the app, not in a web page | `ReaderView.swift` |
+| 2 | Native **Notes** — notes anchored to documents, stored on this machine | `NotesView.swift`, `LearningStore.swift` |
+| 3 | Library filters — All / Favourites / Unread / Ready, each with a count | `LibraryView.swift` |
+| 4 | Favourites — star a document, it floats to the top of the library | `LearningStore.swift` |
+| 5 | Read state — mark what you have read, and filter by it | `LearningStore.swift` |
+| 6 | Continue reading — pick up the last document at the chapter you left | `LearningStore.swift` |
+| 7 | Find in briefing — a native find bar over the whole briefing | `ReaderView.swift` |
+| 8 | Live command palette — searches documents and notes as you type | `CommandPalette.swift` |
+| 9 | Keyboard shortcuts — ⌘1–⌘5, ⌘L, ⌘F, ⌘N, ⌘O, ⌘E, ⌘S, plus a shortcut sheet | `SuiteController.swift` |
+| 10 | Card actions — add a note, favourite, mark as read, all from the card | `LibraryView.swift` |
+
+### The layout bug the redesign exposed
+
+The first cut of the redesign left the content area squeezed into a narrow
+column with a wide empty space to its right. The cause was the root view: a
+horizontal `NSStackView` whose second arranged subview was a bare `NSView`.
+A view with no intrinsic content size gives the stack nothing to distribute
+width by, so it took a minimal width and left the rest of the window empty.
+The root is now a plain view with explicit constraints.
+
+The same bug showed up as a runtime warning — `UICollectionViewFlowLayout`
+complaining that a 268pt card was wider than the collection view — which
+proved the content area really was narrow rather than merely looking it. The
+card grid is now laid out by `LibraryGridLayout`, which divides the width
+into equal columns and computes exact frames, so cards never stretch.
+
+### Modules
+
+| module | what it is |
+|---|---|
+| Library | every document on this machine, as cards |
+| Reader | the briefing, rendered natively, with find and listen |
+| Notes | notes you wrote, attached to the documents they came from |
+| Review | reserved for spaced repetition |
+| App | the wrapped SlothRead web app — the synthesis engine |
+
 ## Phase 1 — the ten improvements
 
 All ten are implemented. The self-test gate (`./build.sh test`) exercises
@@ -83,18 +220,32 @@ Building the gate found four real defects that had been invisible:
 
 ## Verified
 
-The gate (`./build.sh test`) is green at **18/18**, exit 0:
+The gate (`./build.sh test`) is green at **28/28**, exit 0:
 
 ```
 config.apps, config.services, stack.script, stack.ports.read,
-health.read, webview.attached, webview.url, webview.title,
-bridge.status, library.documents, web.endpoint.read, provider.endpoint,
-mac.service, mac.chat, mac.speak, selftest.fixture, filepicker.fired,
-upload.pipeline
+health.read, webview.attached, page.ready, webview.url, webview.title,
+bridge.status, library.documents, module.library, module.reader,
+module.notes, module.app, learning.note, learning.favourite,
+learning.read, learning.cleanup, briefing.fetch, web.endpoint.read,
+provider.endpoint, mac.service, mac.chat, mac.speak, selftest.fixture,
+filepicker.fired, upload.pipeline
 ```
+
+The gate cleans up after itself: the document it uploads is deleted again
+before the run ends, so a gate that runs on every build does not leave a
+copy of the fixture in the library each time.
 
 The Mac provider path was also verified against the live stack: switching to
 `mac` persists to `backend/storage/provider.json`, the on-device model
 answers with valid JSON, and with the service pointed at a dead port the
 backend falls back to Ollama without raising.
+
+Audio was verified end to end: `/mac/speak` returns a 16 kHz mono WAV with
+real signal (not silence), and `AVAudioPlayer` plays it — `isPlaying` is
+true after half a second and the duration matches the file.
+
+Every module was rendered and inspected with `--snapshot`, at 1320×932 and
+at the 1000×680 minimum: Library, Reader, Notes, App and the pop-out audio
+window.
 

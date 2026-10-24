@@ -125,6 +125,22 @@ struct SuiteConfig: Codable, Equatable {
         }
     }
 
+    /// Write the current configuration back to disk.
+    ///
+    /// Used when the suite recovers a stale stack-script path: the fix has
+    /// to survive the next launch, not just this one.
+    @discardableResult
+    func save() -> Bool {
+        guard let data = try? JSONEncoder.pretty.encode(self) else { return false }
+        do {
+            try data.write(to: SuiteConfig.configFileURL, options: .atomic)
+            return true
+        } catch {
+            Log.shared.write("could not save the config: \(error)")
+            return false
+        }
+    }
+
     /// Bring an older config file up to date.
     ///
     /// SlothMode was removed from the suite, but a config file written
