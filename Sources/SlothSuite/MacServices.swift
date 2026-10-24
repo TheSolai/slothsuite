@@ -1,5 +1,6 @@
 import Cocoa
 import Foundation
+import Network
 
 /// Manages the bundled `mac-service` helper.
 ///
@@ -20,6 +21,9 @@ final class MacServices {
     }
 
     private(set) var process: Process?
+    /// True when this process started the helper and is therefore the one
+    /// that should stop it on quit.
+    private var ownsProcess = false
     private var lastStatus: Status?
     private var lastStatusAt: Date = .distantPast
 
@@ -34,9 +38,21 @@ final class MacServices {
     ///
     /// A GUI app inherits a minimal PATH, so the helper is launched with an
     /// absolute path and does not rely on the environment at all.
+    ///
+    /// If something is already listening on the port — a helper left over
+    /// from a previous launch, say — it is adopted rather than duplicated.
+    /// The second instance would fail to bind and exit, and the suite would
+    /// then hold a reference to a dead process and never clean up the real
+    /// one.
     @discardableResult
     func launch() -> Bool {
         if let process, process.isRunning { return true }
+
+        if Self.isPortOpen(port) {
+            Log.shared.write("mac-service already running on \(port) — adopting it")
+            ownsProcess = false
+            return true
+        }
 
         let executable = Bundle.main.bundleURL
             .appendingPathComponent("Contents/MacOS/mac-service")
@@ -54,6 +70,7 @@ final class MacServices {
         do {
             try task.run()
             process = task
+            ownsProcess = true
             Log.shared.write("mac-service started (pid \(task.processIdentifier))")
             return true
         } catch {
@@ -63,10 +80,41 @@ final class MacServices {
     }
 
     func terminate() {
-        guard let process, process.isRunning else { return }
+        // Only stop the helper if this process is the one that started it.
+        guard ownsProcess, let process, process.isRunning else { return }
         process.terminate()
         self.process = nil
+        ownsProcess = false
         Log.shared.write("mac-service stopped")
+    }
+
+    /// Is something listening on this loopback port?
+    private static func isPortOpen(_ port: UInt16, timeout: TimeInterval = 0.4) -> Bool {
+        guard let nwPort = NWEndpoint.Port(rawValue: port) else { return false }
+        let endpoint = NWEndpoint.hostPort(host: .ipv4(.loopback), port: nwPort)
+        let connection = NWConnection(to: endpoint, using: .tcp)
+        let queue = DispatchQueue(label: "slothsuite.macsvc.portcheck")
+        let semaphore = DispatchSemaphore(value: 0)
+        let box = MacPortFlag()
+
+        connection.stateUpdateHandler = { state in
+            switch state {
+            case .ready:
+                box.set()
+                connection.cancel()
+                semaphore.signal()
+            case .failed, .cancelled:
+                connection.cancel()
+                semaphore.signal()
+            default:
+                break
+            }
+        }
+
+        connection.start(queue: queue)
+        _ = semaphore.wait(timeout: .now() + timeout)
+        connection.cancel()
+        return box.value
     }
 
     // MARK: - Status
@@ -169,5 +217,22 @@ enum MacServiceError: LocalizedError {
         case .badResponse: return "The Mac service did not return a usable response."
         case .unavailable: return "The Mac service is not running."
         }
+    }
+}
+
+/// A tiny thread-safe boolean, used to make sure the port probe only
+/// signals its semaphore once.
+private final class MacPortFlag {
+    private let lock = NSLock()
+    private var stored = false
+
+    var value: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return stored
+    }
+
+    func set() {
+        lock.lock(); defer { lock.unlock() }
+        stored = true
     }
 }

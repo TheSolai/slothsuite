@@ -72,11 +72,29 @@ Building the gate found four real defects that had been invisible:
 
 ## Still open
 
-- The SlotRead backend's `/api/provider` and `/api/audio` endpoints are
-  being finished; the self-test gate will fail until they land.
-- The on-device model is slower than Ollama on a long chapter. The
-  provider fallback chain handles it, but the Mac provider is best suited
-  to short passages.
-- DNS-rebinding TOCTOU remains a theoretical gap in both backends' SSRF
-  guards: the address is checked, then the connection is made by hostname.
+- The on-device model is slower than Ollama on a long chapter. The provider
+  fallback chain handles it, but the Mac provider is best suited to short
+  passages.
+- DNS-rebinding TOCTOU remains a theoretical gap in the backend's SSRF
+  guard: the address is checked, then the connection is made by hostname.
   Pinning the connection to the checked IP would need a custom transport.
+- The ElevenLabs cloud fallback in the backend is only exercised on its
+  "no key" path — there is no key to test the real API with.
+
+## Verified
+
+The gate (`./build.sh test`) is green at **18/18**, exit 0:
+
+```
+config.apps, config.services, stack.script, stack.ports.read,
+health.read, webview.attached, webview.url, webview.title,
+bridge.status, library.documents, web.endpoint.read, provider.endpoint,
+mac.service, mac.chat, mac.speak, selftest.fixture, filepicker.fired,
+upload.pipeline
+```
+
+The Mac provider path was also verified against the live stack: switching to
+`mac` persists to `backend/storage/provider.json`, the on-device model
+answers with valid JSON, and with the service pointed at a dead port the
+backend falls back to Ollama without raising.
+
