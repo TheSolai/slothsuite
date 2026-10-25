@@ -366,6 +366,47 @@ The reader remembers where you were, and puts you back there.
 - The library card shows **"Ch 3 of 10"** for a document you have started, so
   a half-read book does not look like an unread one.
 
+## The reader, laid out like the deck it replaced
+
+Each chapter in the reader is laid out the way the wrapped executive deck laid
+it out, and each block of the chapter has its own place on the page.
+
+- A **kicker** — "CHAPTER 15 OF 39 · pp. Chapter 15 · ~402 words" — with a
+  hairline under it, so you always know where you are in a long book.
+- The **chapter title**, set large.
+- The **three key takeaways**, each on its own tinted panel with a numbered
+  badge in the gutter.
+- The **three key terms** as chips. Hover one and the definition appears.
+- The **keyword tags** — what the chapter covers — as small blue chips.
+- The **glossary**, the **tips** and the **hints**, each on its own panel.
+- The **60-second recap**, quoted, in a teal panel.
+
+The briefing is still one piece of text, so it can be searched, selected,
+copied and found with ⌘F. The panels and the badges are painted *behind* and
+*beside* that text by the text view, which is what lets the badge follow the
+system appearance: an image would freeze the colour it was drawn with.
+
+### Where the extra content comes from
+
+The key terms, keywords, tips and hints are produced by the model when a book
+is analysed, so a book analysed before this change does not have them yet. The
+reader shows what a book has — a briefing with no tips simply has no tips
+panel — and the books in the library have been re-analysed to pick up the
+fuller brief. A re-analysis does not replace the book: the new brief is copied
+over the existing entry, so the note you wrote and the place you stopped
+reading are still there.
+
+The glossary is cleaned up on the way. A model asked for "technical terms" in
+a chapter of running prose hands back whatever happened to be capitalised, and
+the first word of a sentence is capitalised by accident. Common words are
+dropped rather than shown, so the glossary reads "Pagan deity" instead of
+"Please".
+
+A model will also sometimes answer the *instruction* instead of the question,
+and hand back "The second central idea" as a key term. Those are recognised
+and dropped, and the terms are made up from the glossary and the chapter's
+own vocabulary instead, so a chapter always shows real terms.
+
 ## Review
 
 The review desk is spaced repetition over your own notes. It was the one

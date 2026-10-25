@@ -242,6 +242,108 @@ reader, the notes and the audio window were all rendered that way and read
 correctly — dark cards, readable titles, badges and chips in their dark
 variants.
 
+## Phase 8 — the reader that looks like the deck it replaced
+
+*"You lost the keywords that came with each chapter, 3 key terms, tips and hints,
+also it looks unpro, please polish it up more like the original."*
+
+The original was the wrapped executive deck — a dark glass card with a
+chapter kicker, three numbered takeaways, an interactive glossary and a
+sixty-second audio recap. The native reader had none of that. It was a
+wall of grey text in a text view, and the three takeaways were a numbered
+list with no weight.
+
+### The content was never produced
+
+The words were missing at the source. The backend asked the model for
+three things per chapter — takeaways, a glossary and a spoken script —
+and that was all. Key terms, keywords, tips and hints had to be asked for
+before they could be shown.
+
+The chapter brief now asks for all of them:
+
+- **Three key terms** — the chapter's central ideas, each with a definition
+  a reader could follow without the book.
+- **Three to six keyword tags** — what the chapter covers.
+- **Two or three tips** — what the reader could do with the chapter.
+- **Two or three hints** — what is worth noticing in it.
+
+And the glossary was cleaned up. A model asked for "technical terms" in a
+chapter of running prose hands back whatever was capitalised, and the first
+word of a sentence is capitalised by accident. The result was a glossary
+that read "Please", "Looking" and "Doing Readings" — noise with the
+authority of a definition. Terms that are common words are now dropped
+rather than shown, and the brief says so.
+
+The extractive fallback fills the new fields too, so a briefing made
+without a model still has the same shape as one made with it.
+
+### The model answers the instruction instead of the question
+
+Asking for three key terms produced three key terms — and sometimes three
+*placeholders*. The brief asks for "the central idea of this chapter", and
+a small local model will hand that back verbatim as a term:
+
+> **The central idea of this chapter, named in a few words**
+> **The second central idea**
+> **The third central idea**
+
+Under a KEY TERMS heading, that looks like the app has nothing to say. So
+the placeholders are recognised and dropped, and the terms are made up from
+the best source that has them: the model's own terms first, then the
+glossary, then the chapter's own vocabulary. A chapter always ends up with
+real terms.
+
+The same pass fixed two more things it turned up. "Please" was reaching the
+reader as a key term through the chapter-text fallback, which never had the
+common-word filter the model's answers went through. And "Ching" was what
+"Tao Te Ching" became when the phrase rule was too strict — a name has to
+survive being picked out of running prose.
+
+### The reader now has the deck's shape
+
+Each chapter is laid out the way the deck laid it out:
+
+- a **kicker** — "CHAPTER 15 OF 39 · pp. Chapter 15 · ~402 words" — with a
+  hairline under it;
+- the **chapter title**, set large;
+- the **three key takeaways**, each on its own tinted panel with a numbered
+  badge in the gutter;
+- the **three key terms** as chips, with the definition on hover;
+- the **keyword tags** as small blue chips;
+- the **glossary**, **tips** and **hints**, each on its own panel;
+- the **60-second recap**, in a teal panel, quoted.
+
+### How the panels are drawn
+
+The briefing is one long piece of text, so that it can be searched,
+selected, copied and found with ⌘F. A panel is the drawn shape *behind* a
+run of that text, and the text view paints it: a rounded rectangle in the
+card's colour, with a hairline border.
+
+The badge is painted too, rather than pasted in as an image. An image
+freezes the colour it was drawn with, so it would stay violet in the dark
+appearance and pale grey in the light one — the exact failure this
+codebase already documents in Phase 6. A painted badge follows the system
+appearance because it is resolved against the window's.
+
+The first attempt put the badge on the second line of the takeaway. The
+card's rect is padded and the line fragment is not, so the two cannot be
+mixed: the badge's centre comes from the line fragment, and the card's
+rect only tells it where to sit across.
+
+### Books have to be re-synthesised
+
+The new fields are produced when a book is analysed, so a book that was
+analysed before this change does not have them. The reader shows what a
+book has — a briefing without key terms simply has no key terms row —
+and the books in the library are being re-analysed with the new brief.
+
+A re-analysis does not replace the book. It produces a new document, and
+the new brief is copied over the existing entry under the existing id,
+keeping the original date. A reader who had written a note against a book
+and stopped in chapter fourteen still has both.
+
 ## Phase 7 — the fourth ten: a learning desk that remembers
 
 *"Now make 10 QoL improvements."* Every one of these was a gap found by

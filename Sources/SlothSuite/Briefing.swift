@@ -34,7 +34,10 @@ struct Briefing: Equatable {
         for chapter in chapters {
             parts.append(chapter.title)
             parts.append(contentsOf: chapter.takeaways)
+            parts.append(contentsOf: chapter.keyTerms.map { "\($0.term): \($0.definition)" })
             parts.append(contentsOf: chapter.glossary.map { "\($0.term): \($0.definition)" })
+            parts.append(contentsOf: chapter.tips)
+            parts.append(contentsOf: chapter.hints)
         }
         return parts.joined(separator: "\n\n")
     }
@@ -66,11 +69,22 @@ struct Briefing: Equatable {
                     definition: ($0["definition"] as? String) ?? ""
                 )
             }
+            let keyTerms = (raw["key_terms"] as? [[String: Any]] ?? []).map {
+                BriefingGlossary(
+                    term: ($0["term"] as? String) ?? "",
+                    definition: ($0["definition"] as? String) ?? ""
+                )
+            }
             chapters.append(BriefingChapter(
                 title: (raw["title"] as? String) ?? "Chapter",
                 pageRange: (raw["page_range"] as? String) ?? "",
+                wordCount: (raw["word_count"] as? Int) ?? 0,
                 takeaways: (raw["takeaways"] as? [String]) ?? [],
+                keyTerms: keyTerms,
+                keywords: (raw["keywords"] as? [String]) ?? [],
                 glossary: glossary,
+                tips: (raw["tips"] as? [String]) ?? [],
+                hints: (raw["hints"] as? [String]) ?? [],
                 audioScript: (raw["audio_script"] as? String) ?? ""
             ))
         }
@@ -81,8 +95,17 @@ struct Briefing: Equatable {
 struct BriefingChapter: Equatable {
     var title: String
     var pageRange: String
+    var wordCount: Int
     var takeaways: [String]
+    /// The three ideas the chapter is actually about.
+    var keyTerms: [BriefingGlossary]
+    /// Short tags naming what the chapter covers.
+    var keywords: [String]
     var glossary: [BriefingGlossary]
+    /// What the reader could do with this chapter.
+    var tips: [String]
+    /// What is worth noticing in it.
+    var hints: [String]
     var audioScript: String
 
     /// What the Mac voice should say for this chapter.

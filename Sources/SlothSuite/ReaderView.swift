@@ -347,8 +347,10 @@ final class ReaderView: NSView {
         let built = BriefingTextBuilder.build(briefing)
         textView.textStorage?.setAttributedString(built.string)
         textView.ruleRange = built.thesisRange
-        // The rule is drawn in the margin, to the left of the text. A change
-        // to the text only marks the text itself as dirty, so the rule would
+        textView.ruleRanges = built.ruleRanges
+        textView.cards = built.cards
+        // The panels and the rules are drawn by the text view itself, so a
+        // change to the text only marks the text as dirty — they would
         // never be painted without this.
         textView.needsDisplay = true
         chapterRanges = built.chapterRanges
@@ -560,8 +562,9 @@ final class ReaderView: NSView {
         guard rect.height > 0 else { return }
 
         // The container sits inside the text view's inset, so the heading's
-        // place in the content is that much further down.
-        let target = rect.minY + textView.textContainerInset.height
+        // place in the content is that much further down. The headroom
+        // keeps the whole line in view rather than slicing its top off.
+        let target = rect.minY + textView.textContainerInset.height - Self.chapterHeadroom
         lastReportedChapter = index
         currentChapter = index
         updatePillSelection()
@@ -580,7 +583,7 @@ final class ReaderView: NSView {
         guard let span = chapterSpan(index) else { return }
 
         let clamped = min(max(fraction, 0), 1)
-        let target = span.start + span.height * clamped
+        let target = span.start + span.height * clamped - Self.chapterHeadroom
 
         currentChapter = index
         lastReportedChapter = index
@@ -629,6 +632,14 @@ final class ReaderView: NSView {
         let offset = visible.minY - span.start
         return min(max(offset / span.height, 0), 1)
     }
+
+    /// The room left above a chapter heading when the reader jumps to it.
+    ///
+    /// A heading scrolled flush to the top of the text column has its
+    /// ascenders sliced off by the edge of the scroll view, which reads as
+    /// a rendering fault rather than as a position. A few points of
+    /// headroom puts the whole line in view.
+    private static let chapterHeadroom: CGFloat = 12
 
     // MARK: - Tracking
 
@@ -760,9 +771,9 @@ final class ReaderView: NSView {
 
 /// The text view the briefing is rendered into.
 ///
-/// Two things it does that a plain text view does not: it rules the thesis
-/// block with a hairline in the margin, and it keeps the measure — the width
-/// of the text column — inside a range the eye can follow.
+/// Three things it does that a plain text view does not: it draws the
+/// tinted panels the text sits on, it rules the chapter headings with a
+/// hairline, and it paints the numbered badge in front of each takeaway.
 private final class ReaderTextView: NSTextView {
 
     /// The widest the text column is allowed to get. Past this the eye
@@ -774,14 +785,130 @@ private final class ReaderTextView: NSTextView {
     /// The thesis block, if the briefing has one. The rule is drawn beside it.
     var ruleRange: NSRange?
 
+    /// The ranges that get a hairline under them — one per chapter heading.
+    var ruleRanges: [NSRange] = []
+
+    /// The tinted panels drawn behind the text.
+    var cards: [ReaderCard] = []
+
     override func draw(_ dirtyRect: NSRect) {
+        // The panels are drawn first so the text sits on top of them.
+        drawCards(in: dirtyRect)
         super.draw(dirtyRect)
+        drawRules(in: dirtyRect)
         drawRule(in: dirtyRect)
     }
 
     override func layout() {
         super.layout()
         updateMeasure()
+    }
+
+    // MARK: Cards
+
+    /// Paint the tinted panels behind the text.
+    ///
+    /// A panel spans the whole text column, not just the words: a card
+    /// that stopped halfway through a line would look like a mistake.
+    private func drawCards(in dirtyRect: NSRect) {
+        guard !cards.isEmpty else { return }
+        guard let manager = layoutManager, let container = textContainer else { return }
+
+        manager.ensureLayout(for: container)
+        let width = container.size.width
+        guard width > 0 else { return }
+
+        for card in cards {
+            let glyphRange = manager.glyphRange(forCharacterRange: card.range, actualCharacterRange: nil)
+            guard glyphRange.length > 0 else { continue }
+            let bounds = manager.boundingRect(forGlyphRange: glyphRange, in: container)
+            guard bounds.height > 0 else { continue }
+
+            let rect = NSRect(x: textContainerInset.width,
+                              y: bounds.minY + textContainerInset.height,
+                              width: width,
+                              height: bounds.height)
+                .insetBy(dx: -13, dy: -6)
+            guard rect.intersects(dirtyRect) else { continue }
+
+            let path = NSBezierPath(roundedRect: rect, xRadius: 9, yRadius: 9)
+            resolvedColour(card.kind.fill).setFill()
+            path.fill()
+
+            let border = NSBezierPath(roundedRect: rect.insetBy(dx: 0.5, dy: 0.5), xRadius: 9, yRadius: 9)
+            resolvedColour(Palette.wash(card.kind.accent, amount: 0.30)).setStroke()
+            border.lineWidth = 1
+            border.stroke()
+
+            if let badge = card.badge {
+                drawBadge(badge, in: rect, card: card, manager: manager)
+            }
+        }
+    }
+
+    /// The numbered circle in front of a takeaway.
+    ///
+    /// It is painted rather than pasted in as an image so that it follows
+    /// the system appearance: an image freezes the colour it was drawn
+    /// with, and stays violet in the dark appearance or pale grey in the
+    /// light one.
+    private func drawBadge(_ number: Int,
+                           in cardRect: NSRect,
+                           card: ReaderCard,
+                           manager: NSLayoutManager) {
+        let glyphRange = manager.glyphRange(forCharacterRange: card.range, actualCharacterRange: nil)
+        guard glyphRange.length > 0 else { return }
+
+        // The badge belongs on the first line of the card. The container's
+        // coordinates run upwards, so the first line is at the far end of
+        // the range. Its centre is taken from the line itself rather than
+        // from the card, because the card is padded and the badge is not.
+        let line = manager.lineFragmentRect(forGlyphAt: glyphRange.location, effectiveRange: nil)
+        let diameter: CGFloat = 22
+        let centre = NSPoint(x: cardRect.minX + 27,
+                             y: line.midY + textContainerInset.height - 2)
+
+        let circle = NSRect(x: centre.x - diameter / 2,
+                            y: centre.y - diameter / 2,
+                            width: diameter,
+                            height: diameter)
+        let path = NSBezierPath(ovalIn: circle)
+        resolvedColour(card.kind.accent).setFill()
+        path.fill()
+
+        let text = NSAttributedString(string: "\(number)", attributes: [
+            .font: NSFont.systemFont(ofSize: 12, weight: .bold),
+            .foregroundColor: NSColor.white
+        ])
+        let bounds = text.size()
+        text.draw(at: NSPoint(x: circle.midX - bounds.width / 2,
+                              y: circle.midY - bounds.height / 2))
+    }
+
+    /// A hairline under each chapter heading.
+    private func drawRules(in dirtyRect: NSRect) {
+        guard !ruleRanges.isEmpty else { return }
+        guard let manager = layoutManager, let container = textContainer else { return }
+
+        manager.ensureLayout(for: container)
+        let width = container.size.width
+        guard width > 0 else { return }
+
+        for range in ruleRanges {
+            let glyphRange = manager.glyphRange(forCharacterRange: range, actualCharacterRange: nil)
+            guard glyphRange.length > 0 else { continue }
+            let bounds = manager.boundingRect(forGlyphRange: glyphRange, in: container)
+            guard bounds.height > 0 else { continue }
+
+            let line = NSRect(x: textContainerInset.width,
+                              y: bounds.maxY + textContainerInset.height + 5,
+                              width: width,
+                              height: 1)
+            guard line.intersects(dirtyRect) else { continue }
+
+            resolvedColour(Palette.wash(Palette.accent, amount: 0.25)).setFill()
+            NSBezierPath(rect: line).fill()
+        }
     }
 
     /// A hairline in the margin, the length of the thesis block.
@@ -805,8 +932,18 @@ private final class ReaderTextView: NSTextView {
         guard rule.intersects(dirtyRect) else { return }
 
         let path = NSBezierPath(roundedRect: rule, xRadius: 1.5, yRadius: 1.5)
-        Palette.accent.setFill()
+        resolvedColour(Palette.accent).setFill()
         path.fill()
+    }
+
+    /// A colour resolved against the window's appearance.
+    ///
+    /// A `CGColor` keeps the colour it was given, so a dynamic colour has
+    /// to be resolved before it is drawn. The appearance is the window's,
+    /// because AppKit updates the tree from the top down and a child's own
+    /// appearance is still the old one while it repaints.
+    private func resolvedColour(_ colour: NSColor) -> NSColor {
+        NSColor(cgColor: resolvedCGColor(colour)) ?? colour
     }
 
     /// Keep the column a comfortable width, centred when there is room.
@@ -985,6 +1122,11 @@ private final class ReaderChip: NSView {
 /// The type ramp and the paragraph rhythm live here rather than in the view,
 /// so the view stays a view: it owns the layout and the jumps, this owns the
 /// words on the page.
+///
+/// The shape of a chapter follows the wrapped app's executive deck: a kicker
+/// that says which chapter this is, the three key takeaways as numbered
+/// panels, the three key terms as chips, the keyword tags, the tips, the
+/// hints, and the spoken recap at the end.
 private final class BriefingTextBuilder {
 
     struct Output {
@@ -993,18 +1135,30 @@ private final class BriefingTextBuilder {
         let chapterRanges: [NSRange]
         /// The range of the thesis block, so the view can rule it.
         let thesisRange: NSRange?
+        /// The panels to draw behind the text.
+        let cards: [ReaderCard]
+        /// The term chips.
+        let chips: [ReaderChipInfo]
+        /// The ranges to rule underneath.
+        let ruleRanges: [NSRange]
     }
 
     private let text = NSMutableAttributedString()
+    private var cards: [ReaderCard] = []
+    private var chips: [ReaderChipInfo] = []
+    private var ruleRanges: [NSRange] = []
 
     // MARK: Type
 
     private static let bodyFont = Typography.reading()
     private static let thesisFont = NSFont.systemFont(ofSize: 19, weight: .semibold)
-    private static let headingFont = NSFont.systemFont(ofSize: 13, weight: .bold)
-    private static let subheadingFont = NSFont.systemFont(ofSize: 12, weight: .bold)
+    private static let headingFont = NSFont.systemFont(ofSize: 11, weight: .bold)
+    private static let chapterTitleFont = NSFont.systemFont(ofSize: 22, weight: .bold)
+    private static let subheadingFont = NSFont.systemFont(ofSize: 11, weight: .bold)
     private static let captionFont = Typography.secondary()
-    private static let termFont = NSFont.systemFont(ofSize: 16, weight: .bold)
+    private static let chipFont = NSFont.systemFont(ofSize: 12, weight: .semibold)
+    private static let tagFont = NSFont.systemFont(ofSize: 11, weight: .medium)
+    private static let termFont = NSFont.systemFont(ofSize: 15, weight: .semibold)
 
     // MARK: Building
 
@@ -1032,30 +1186,38 @@ private final class BriefingTextBuilder {
             builder.bulleted(briefing.keyPoints)
         }
 
+        let total = briefing.chapters.count
         for (index, chapter) in briefing.chapters.enumerated() {
-            builder.air()
-            chapterRanges.append(builder.chapterHeading(number: index + 1,
-                                                        title: chapter.title,
-                                                        pageRange: chapter.pageRange))
-            if !chapter.takeaways.isEmpty {
-                builder.subheading("High-impact takeaways")
-                builder.numbered(chapter.takeaways)
-            }
-            if !chapter.glossary.isEmpty {
-                builder.subheading("Glossary")
-                builder.glossary(chapter.glossary)
-            }
+            builder.air(extra: 16)
+
+            let kicker = builder.chapterKicker(number: index + 1, of: total, chapter: chapter)
+            chapterRanges.append(kicker)
+            builder.ruleRanges.append(kicker)
+
+            builder.chapterTitle(chapter.title)
+            builder.takeaways(chapter.takeaways)
+            builder.keyTerms(chapter.keyTerms)
+            builder.keywords(chapter.keywords)
+            builder.glossary(chapter.glossary)
+            builder.tips(chapter.tips)
+            builder.hints(chapter.hints)
+            builder.audio(chapter.audioScript)
         }
 
-        return Output(string: builder.text, chapterRanges: chapterRanges, thesisRange: thesisRange)
+        return Output(string: builder.text,
+                      chapterRanges: chapterRanges,
+                      thesisRange: thesisRange,
+                      cards: builder.cards,
+                      chips: builder.chips,
+                      ruleRanges: builder.ruleRanges)
     }
 
     // MARK: Pieces
 
     /// A little air above a heading. Paragraph styles have no space-before,
     /// so the gap is an empty line with a small font.
-    private func air() {
-        append("", font: .systemFont(ofSize: 10), colour: .clear, style: Self.airStyle())
+    private func air(extra: CGFloat = 0) {
+        append("", font: .systemFont(ofSize: 10 + extra / 4), colour: .clear, style: Self.airStyle())
     }
 
     private func heading(_ title: String) {
@@ -1075,16 +1237,155 @@ private final class BriefingTextBuilder {
         append(body, font: Self.thesisFont, colour: .secondaryLabelColor, style: Self.thesisStyle())
     }
 
-    private func chapterHeading(number: Int, title: String, pageRange: String) -> NSRange {
-        let heading = "Chapter \(number) — \(title)".uppercased()
-        let range = append(heading, font: Self.headingFont, colour: Palette.accent,
-                           style: Self.headingStyle(), endsParagraph: false)
-        let caption = Self.pageRange(pageRange)
-        if !caption.isEmpty {
-            append("   \(caption)", font: Self.captionFont, colour: .secondaryLabelColor,
-                   style: Self.headingStyle())
+    /// The line that says which chapter this is.
+    ///
+    /// "CHAPTER 07 OF 39 · pp. Chapter 15 · ~1,240 words" — the same
+    /// information the wrapped app put on its slide, and the thing the
+    /// reader needs when they come back to a place they left.
+    private func chapterKicker(number: Int, of total: Int, chapter: BriefingChapter) -> NSRange {
+        let start = text.length
+        append("CHAPTER \(String(format: "%02d", number)) OF \(total)",
+               font: Self.headingFont, colour: Palette.accent, style: Self.kickerStyle(), endsParagraph: false)
+
+        var detail: [String] = []
+        if !chapter.pageRange.isEmpty { detail.append(Self.pageRange(chapter.pageRange)) }
+        if chapter.wordCount > 0 { detail.append("~\(chapter.wordCount.formatted()) words") }
+        if !detail.isEmpty {
+            append("   ·   \(detail.joined(separator: "  ·  "))",
+                   font: Self.captionFont, colour: .tertiaryLabelColor, style: Self.kickerStyle(), endsParagraph: false)
         }
-        return range
+
+        endParagraph(font: Self.captionFont, style: Self.kickerStyle())
+        return NSRange(location: start, length: text.length - start)
+    }
+
+    /// The chapter's own title, set large the way the deck set it.
+    private func chapterTitle(_ title: String) {
+        let clean = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !clean.isEmpty else { return }
+        append(clean, font: Self.chapterTitleFont, colour: .labelColor, style: Self.chapterTitleStyle())
+    }
+
+    /// The three key takeaways, each on its own numbered panel.
+    private func takeaways(_ items: [String]) {
+        let usable = items.filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        guard !usable.isEmpty else { return }
+
+        for (index, item) in usable.prefix(3).enumerated() {
+            let start = text.length
+            append(item, font: Self.bodyFont, colour: .labelColor,
+                   style: Self.takeawayStyle(), endsParagraph: false)
+            let end = text.length
+            endParagraph(font: Self.bodyFont, style: Self.takeawayStyle())
+            cards.append(ReaderCard(kind: .takeaway,
+                                     range: NSRange(location: start, length: end - start),
+                                     badge: index + 1))
+        }
+    }
+
+    /// The three key terms, as chips.
+    ///
+    /// Hovering a chip shows what the term means, which is what the wrapped
+    /// app did with its glossary.
+    private func keyTerms(_ entries: [BriefingGlossary]) {
+        let usable = entries.filter { !$0.term.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        guard !usable.isEmpty else { return }
+
+        subheading("Key terms")
+        for (index, entry) in usable.prefix(3).enumerated() {
+            if index > 0 {
+                append("   ", font: Self.chipFont, colour: .clear, style: Self.chipStyle(), endsParagraph: false)
+            }
+            let start = text.length
+            append(" \(entry.term) ", font: Self.chipFont, colour: Palette.accent,
+                   style: Self.chipStyle(), endsParagraph: false,
+                   background: Palette.wash(Palette.accent, amount: 0.14))
+            let range = NSRange(location: start, length: text.length - start)
+            chips.append(ReaderChipInfo(term: entry.term,
+                                         definition: entry.definition,
+                                         range: range))
+            // The text system shows this when the reader hovers the chip.
+            text.addAttribute(.toolTip, value: entry.definition, range: range)
+        }
+        endParagraph(font: Self.chipFont, style: Self.chipStyle())
+    }
+
+    /// The short tags that say what the chapter covers.
+    private func keywords(_ tags: [String]) {
+        let usable = tags.filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        guard !usable.isEmpty else { return }
+
+        subheading("Keywords")
+        for (index, tag) in usable.prefix(6).enumerated() {
+            if index > 0 {
+                append(" ", font: Self.tagFont, colour: .clear, style: Self.tagStyle(), endsParagraph: false)
+            }
+            append("\(tag) ", font: Self.tagFont, colour: Palette.blue,
+                   style: Self.tagStyle(), endsParagraph: false,
+                   background: Palette.wash(Palette.blue, amount: 0.11))
+        }
+        endParagraph(font: Self.tagFont, style: Self.tagStyle())
+    }
+
+    /// The vocabulary of the chapter: a term and what it means.
+    private func glossary(_ entries: [BriefingGlossary]) {
+        let usable = entries.filter { !$0.term.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        guard !usable.isEmpty else { return }
+
+        subheading("Glossary")
+        for entry in usable.prefix(5) {
+            append(entry.term, font: Self.termFont, colour: .labelColor,
+                   style: Self.glossaryStyle(), endsParagraph: false)
+            append("  ", font: Self.bodyFont, colour: .secondaryLabelColor,
+                   style: Self.glossaryStyle(), endsParagraph: false)
+            append(entry.definition, font: Self.bodyFont, colour: .secondaryLabelColor,
+                   style: Self.glossaryStyle())
+        }
+    }
+
+    /// What the reader could do with this chapter.
+    private func tips(_ items: [String]) {
+        let usable = items.filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        guard !usable.isEmpty else { return }
+
+        subheading("Tips")
+        let start = text.length
+        for item in usable.prefix(3) {
+            append("•", font: Self.bodyFont, colour: Palette.green,
+                   style: Self.tipStyle(), endsParagraph: false)
+            append("   \(item)", font: Self.bodyFont, colour: .labelColor, style: Self.tipStyle())
+        }
+        cards.append(ReaderCard(kind: .tips,
+                                 range: NSRange(location: start, length: text.length - start)))
+    }
+
+    /// What is worth noticing in this chapter.
+    private func hints(_ items: [String]) {
+        let usable = items.filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        guard !usable.isEmpty else { return }
+
+        subheading("Hints")
+        let start = text.length
+        for item in usable.prefix(3) {
+            append("◆", font: NSFont.systemFont(ofSize: 11), colour: Palette.gold,
+                   style: Self.tipStyle(), endsParagraph: false)
+            append("   \(item)", font: Self.bodyFont, colour: .labelColor, style: Self.tipStyle())
+        }
+        cards.append(ReaderCard(kind: .hints,
+                                 range: NSRange(location: start, length: text.length - start)))
+    }
+
+    /// The spoken 60-second recap.
+    private func audio(_ script: String) {
+        let clean = script.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !clean.isEmpty else { return }
+
+        subheading("60-second recap")
+        let start = text.length
+        append("“\(clean)”", font: Self.bodyFont, colour: .secondaryLabelColor,
+               style: Self.quoteStyle())
+        cards.append(ReaderCard(kind: .audio,
+                                 range: NSRange(location: start, length: text.length - start)))
     }
 
     private func numbered(_ items: [String]) {
@@ -1103,18 +1404,6 @@ private final class BriefingTextBuilder {
         }
     }
 
-    /// A glossary entry: the term in bold, the definition after it.
-    private func glossary(_ entries: [BriefingGlossary]) {
-        for entry in entries {
-            append(entry.term, font: Self.termFont, colour: .labelColor,
-                   style: Self.glossaryStyle(), endsParagraph: false)
-            append("  ", font: Self.bodyFont, colour: .secondaryLabelColor,
-                   style: Self.glossaryStyle(), endsParagraph: false)
-            append(entry.definition, font: Self.bodyFont, colour: .secondaryLabelColor,
-                   style: Self.glossaryStyle())
-        }
-    }
-
     /// Add a piece of text.
     ///
     /// Every piece ends its own paragraph unless it says otherwise. Without
@@ -1126,21 +1415,31 @@ private final class BriefingTextBuilder {
                         font: NSFont,
                         colour: NSColor,
                         style: NSParagraphStyle,
-                        endsParagraph: Bool = true) -> NSRange {
+                        endsParagraph: Bool = true,
+                        background: NSColor? = nil) -> NSRange {
         let range = NSRange(location: text.length, length: (string as NSString).length)
-        text.append(NSAttributedString(string: string, attributes: [
+        var attributes: [NSAttributedString.Key: Any] = [
             .font: font,
             .foregroundColor: colour,
             .paragraphStyle: style
-        ]))
+        ]
+        if let background {
+            attributes[.backgroundColor] = background
+        }
+        text.append(NSAttributedString(string: string, attributes: attributes))
         if endsParagraph {
-            text.append(NSAttributedString(string: "\n", attributes: [
-                .font: font,
-                .foregroundColor: colour,
-                .paragraphStyle: style
-            ]))
+            endParagraph(font: font, style: style)
         }
         return range
+    }
+
+    /// End the current paragraph.
+    private func endParagraph(font: NSFont, style: NSParagraphStyle) {
+        text.append(NSAttributedString(string: "\n", attributes: [
+            .font: font,
+            .foregroundColor: NSColor.clear,
+            .paragraphStyle: style
+        ]))
     }
 
     // MARK: Page ranges
@@ -1214,6 +1513,70 @@ private final class BriefingTextBuilder {
         let style = NSMutableParagraphStyle()
         style.lineHeightMultiple = 1.0
         style.paragraphSpacing = 0
+        return style
+    }
+
+    /// The kicker: one line, with room under it for the hairline.
+    private static func kickerStyle() -> NSParagraphStyle {
+        let style = NSMutableParagraphStyle()
+        style.lineHeightMultiple = 1.0
+        style.paragraphSpacing = 10
+        return style
+    }
+
+    private static func chapterTitleStyle() -> NSParagraphStyle {
+        let style = NSMutableParagraphStyle()
+        style.lineSpacing = 3
+        style.lineHeightMultiple = 1.15
+        style.paragraphSpacing = 14
+        return style
+    }
+
+    /// A takeaway: the text sits clear of the badge in the gutter, and
+    /// every line lines up with the first.
+    private static func takeawayStyle() -> NSParagraphStyle {
+        let style = NSMutableParagraphStyle()
+        style.lineSpacing = 5
+        style.lineHeightMultiple = 1.3
+        style.paragraphSpacing = 9
+        style.headIndent = 34
+        style.firstLineHeadIndent = 34
+        return style
+    }
+
+    private static func chipStyle() -> NSParagraphStyle {
+        let style = NSMutableParagraphStyle()
+        style.lineSpacing = 8
+        style.lineHeightMultiple = 1.1
+        style.paragraphSpacing = 10
+        return style
+    }
+
+    private static func tagStyle() -> NSParagraphStyle {
+        let style = NSMutableParagraphStyle()
+        style.lineSpacing = 7
+        style.lineHeightMultiple = 1.1
+        style.paragraphSpacing = 10
+        return style
+    }
+
+    private static func tipStyle() -> NSParagraphStyle {
+        let style = NSMutableParagraphStyle()
+        style.lineSpacing = 4
+        style.lineHeightMultiple = 1.3
+        style.paragraphSpacing = 5
+        style.headIndent = 20
+        style.firstLineHeadIndent = -20
+        return style
+    }
+
+    private static func quoteStyle() -> NSParagraphStyle {
+        let style = NSMutableParagraphStyle()
+        style.lineSpacing = 5
+        style.lineHeightMultiple = 1.3
+        style.paragraphSpacing = 8
+        style.headIndent = 14
+        style.firstLineHeadIndent = 0
         return style
     }
 }

@@ -543,6 +543,33 @@ final class SelfTestRunner {
         check("briefing.fetch",
               !briefing.title.isEmpty && (!briefing.chapters.isEmpty || !briefing.executiveSummary.isEmpty),
               "\(briefing.title) — \(briefing.chapters.count) chapters")
+
+        // A chapter has to carry the things the reader draws: the three
+        // key terms, the keywords, the tips and the hints. A briefing
+        // made before the brief asked for them still renders — the
+        // reader leaves out what a book does not have — so this is a
+        // check on the new shape, not on every book in the library.
+        let chapter = briefing.chapters.first
+        let shaped = chapter.map { chapter in
+            !chapter.keyTerms.isEmpty
+                && !chapter.keywords.isEmpty
+                && !chapter.tips.isEmpty
+                && !chapter.hints.isEmpty
+                && chapter.takeaways.count == 3
+        } ?? false
+        if shaped {
+            check("briefing.shape", true, "key terms, keywords, tips and hints are all there")
+        } else {
+            // Not every book has been re-analysed yet, so this is only a
+            // failure when the backend says it should have them.
+            let keys = (chapter?.keyTerms.isEmpty ?? true)
+                && (chapter?.keywords.isEmpty ?? true)
+                && (chapter?.tips.isEmpty ?? true)
+                && (chapter?.hints.isEmpty ?? true)
+            check("briefing.shape", keys,
+                  keys ? "this book was analysed before the fuller brief"
+                       : "a chapter is missing part of its brief")
+        }
     }
 
     /// The Mac helper, the on-device model and the Mac voice.
