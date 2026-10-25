@@ -53,10 +53,14 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
     private var libraryView: LibraryView!
     private var readerView: ReaderView!
     private var notesView: NotesView!
+    private var reviewView: ReviewView!
     private var dropView: DropView!
 
     /// The document currently open in the reader.
     private var openDocumentId: String?
+
+    /// The chapter the reader should open at, when one was asked for.
+    private var openChapter: Int?
 
     /// Pins the content view to the window's content area.
     private var contentSizeConstraints: (width: NSLayoutConstraint, height: NSLayoutConstraint)?
@@ -123,6 +127,10 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
         }
 
         MacServices.shared.launch()
+        // Watch it. The helper can wedge — the on-device model is a single
+        // resource — and nobody should have to notice that and restart the
+        // app by hand.
+        MacServices.shared.startWatchdog()
 
         buildWindow()
         buildToolbar()
@@ -472,6 +480,15 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
         libraryView.onFilterChange = { filter in
             LibraryStore.shared.setFilter(filter)
         }
+        libraryView.onSortChange = { sort in
+            LibraryStore.shared.setSort(sort)
+        }
+        libraryView.onBulkRead = { markRead in
+            // Every document in the library, not just the ones the current
+            // filter happens to show.
+            LearningStore.shared.setRead(markRead,
+                                         documentIds: LibraryStore.shared.documents.map(\.id))
+        }
         libraryView.onToggleFavourite = { [weak self] document in
             LearningStore.shared.toggleFavourite(documentId: document.id)
             self?.libraryView.update(documents: LibraryStore.shared.filtered)
@@ -500,7 +517,10 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
             AudioWindowController.shared.show(briefing: briefing)
         }
         readerView.onAddNote = { [weak self] briefing in
-            self?.startNote(forDocumentId: briefing.documentId, title: briefing.title)
+            guard let self else { return }
+            self.startNote(forDocumentId: briefing.documentId,
+                           title: briefing.title,
+                           chapter: self.readerView.currentChapterIndex)
         }
         readerView.onOpenInApp = { [weak self] briefing in
             self?.openInApp(documentId: briefing.documentId)
@@ -511,6 +531,13 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
         readerView.onChapterChanged = { [weak self] chapter in
             guard let self, let id = self.openDocumentId else { return }
             LearningStore.shared.markReading(documentId: id, chapter: chapter)
+        }
+        readerView.onPositionChanged = { [weak self] chapter, scroll in
+            guard let self, let id = self.openDocumentId else { return }
+            // The place is written to disk but not announced: it changes on
+            // every scroll, and telling the whole interface about it would
+            // redraw the library and the notes for nothing.
+            LearningStore.shared.setPosition(documentId: id, chapter: chapter, scroll: scroll)
         }
 
         // The native notes module.
@@ -530,10 +557,30 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
         }
         notesView.onOpenDocument = { [weak self] note in
             guard !note.documentId.isEmpty else { return }
-            self?.openDocument(id: note.documentId)
+            // A note knows the chapter it was taken from, so it opens there.
+            self?.openDocument(id: note.documentId,
+                               chapter: note.chapter > 0 ? note.chapter : nil)
         }
         notesView.onSearch = { [weak self] query in
             self?.filterNotes(query)
+        }
+
+        // The review desk: spaced repetition over the notes.
+        reviewView = ReviewView()
+        reviewView.translatesAutoresizingMaskIntoConstraints = false
+        reviewView.onRate = { noteId, remembered in
+            LearningStore.shared.recordReview(noteId: noteId, remembered: remembered)
+            self.refreshReview()
+        }
+        reviewView.onOpenNote = { [weak self] note in
+            self?.showModule("notes")
+            self?.notesView.show(notes: LearningStore.shared.allNotes)
+            self?.notesView.select(noteId: note.id)
+        }
+        reviewView.onOpenDocument = { [weak self] note in
+            guard !note.documentId.isEmpty else { return }
+            self?.openDocument(id: note.documentId,
+                               chapter: note.chapter > 0 ? note.chapter : nil)
         }
 
         // The wrapped web app.
@@ -591,6 +638,7 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
         contentContainer.addSubview(libraryView)
         contentContainer.addSubview(readerView)
         contentContainer.addSubview(notesView)
+        contentContainer.addSubview(reviewView)
         contentContainer.addSubview(webContainer)
 
         libraryView.leadingAnchor.constraint(equalTo: contentContainer.leadingAnchor).isActive = true
@@ -607,6 +655,11 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
         notesView.trailingAnchor.constraint(equalTo: contentContainer.trailingAnchor).isActive = true
         notesView.topAnchor.constraint(equalTo: contentContainer.topAnchor).isActive = true
         notesView.bottomAnchor.constraint(equalTo: contentContainer.bottomAnchor).isActive = true
+
+        reviewView.leadingAnchor.constraint(equalTo: contentContainer.leadingAnchor).isActive = true
+        reviewView.trailingAnchor.constraint(equalTo: contentContainer.trailingAnchor).isActive = true
+        reviewView.topAnchor.constraint(equalTo: contentContainer.topAnchor).isActive = true
+        reviewView.bottomAnchor.constraint(equalTo: contentContainer.bottomAnchor).isActive = true
 
         webContainer.leadingAnchor.constraint(equalTo: contentContainer.leadingAnchor).isActive = true
         webContainer.trailingAnchor.constraint(equalTo: contentContainer.trailingAnchor).isActive = true
@@ -748,6 +801,7 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
             guard let self else { return }
             self.libraryView.update(documents: LibraryStore.shared.filtered)
             self.notesView.show(notes: LearningStore.shared.allNotes)
+            self.refreshReview()
             self.refreshContinueButton()
             self.updateWindowTitle()
         }
@@ -783,11 +837,18 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
         // Whatever was typed into the notes editor belongs to the note, even
         // if the user walks away before the debounced save fires.
         notesView.flushPendingSave()
+        // The same goes for the reader's place: it is saved when the reader
+        // is put away, so it is remembered even if the reader was still
+        // moving when they left.
+        if currentModule == "reader", id != "reader" {
+            readerView.flushPosition()
+        }
         currentModule = id
 
         libraryView.isHidden = (id != "library")
         readerView.isHidden = (id != "reader")
         notesView.isHidden = (id != "notes")
+        reviewView.isHidden = (id != "review")
         webContainer.isHidden = (id != "app")
 
         switch module.kind {
@@ -799,6 +860,9 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
 
         case .notes:
             notesView.show(notes: LearningStore.shared.allNotes)
+
+        case .review:
+            refreshReview()
 
         case .app:
             for (appId, webView) in webViews {
@@ -823,16 +887,25 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
             readerView.showUnavailable(message: "Pick a document from the Library to read its briefing.")
             return
         }
-        renderBriefing(for: document)
+        renderBriefing(for: document, at: openChapter)
+        openChapter = nil
     }
 
     /// Put a document's briefing into the reader.
-    private func renderBriefing(for document: LibraryDocument) {
+    ///
+    /// `chapter` asks for a particular chapter — a note links to the one it
+    /// was taken from. Without it the reader goes back to where they left
+    /// off, which is the point of remembering a place.
+    private func renderBriefing(for document: LibraryDocument, at chapter: Int? = nil) {
         openDocumentId = document.id
+
+        let position = chapter.map {
+            ReadingPosition(chapter: $0, scroll: 0, updatedAt: Date())
+        } ?? LearningStore.shared.position(for: document.id)
 
         // Already fetched once — render it straight away.
         if let briefing = BriefingStore.shared.briefing(documentId: document.id) {
-            readerView.show(briefing: briefing)
+            readerView.show(briefing: briefing, restoring: position)
             return
         }
 
@@ -847,7 +920,7 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
                 )
                 return
             }
-            self.readerView.show(briefing: briefing)
+            self.readerView.show(briefing: briefing, restoring: position)
         }
     }
 
@@ -862,6 +935,9 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
         case "notes":
             window.title = "Sloth Suite — Notes"
             window.subtitle = "\(LearningStore.shared.allNotes.count) notes"
+        case "review":
+            window.title = "Sloth Suite — Review"
+            window.subtitle = "\(LearningStore.shared.dueCount) due"
         case "app":
             window.title = "Sloth Suite — \(current.title)"
             window.subtitle = current.tagline
@@ -907,6 +983,7 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
         fileMenu.addItem(withTitle: "Continue Reading…", action: #selector(continueReadingAction), keyEquivalent: "")
         fileMenu.addItem(.separator())
         fileMenu.addItem(withTitle: "Export as Separate Files…", action: #selector(exportFiles), keyEquivalent: "e")
+        fileMenu.addItem(withTitle: "Export Notes…", action: #selector(exportNotes), keyEquivalent: "E")
         fileMenu.addItem(.separator())
         fileMenu.addItem(withTitle: "All Audio…", action: #selector(speakOpenDocument), keyEquivalent: "s")
         fileMenu.addItem(withTitle: "Audio and Chapters…", action: #selector(openAudioWindow), keyEquivalent: "")
@@ -1163,6 +1240,36 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
     /// Menu and toolbar entry point.
     @objc private func exportFiles() {
         performExport(document: nil)
+    }
+
+    /// Write every note out as a Markdown file.
+    ///
+    /// The notes are the user's own writing, so there has to be a way to
+    /// get them out of the app and into whatever they use next.
+    @objc private func exportNotes() {
+        let notes = LearningStore.shared.allNotes
+        guard !notes.isEmpty else {
+            presentError(title: "There are no notes to export",
+                         message: "Write a note while you read, and it will appear here.")
+            return
+        }
+
+        Exporter.writeNotes(notes) { [weak self] result in
+            DispatchQueue.main.async {
+                switch result {
+                case .success(let url):
+                    // Shown in the Finder, the way the other export is.
+                    NSWorkspace.shared.activateFileViewerSelecting([url])
+                case .failure(let error):
+                    // The user closed the panel. That is not a failure.
+                    if let exportError = error as? Exporter.ExportError, case .noFiles = exportError {
+                        return
+                    }
+                    self?.presentError(title: "Could not export the notes",
+                                       message: error.localizedDescription)
+                }
+            }
+        }
     }
 
     private func performExport(document: LibraryDocument?) {
@@ -1497,10 +1604,14 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
     ///
     /// The briefing is fetched from the backend and rendered natively, so the
     /// reader works even when the wrapped app is not running.
-    private func openDocument(id: String) {
+    ///
+    /// `chapter` asks for a particular chapter, which is how a note links
+    /// back to the place it was taken from.
+    private func openDocument(id: String, chapter: Int? = nil) {
         guard LibraryStore.shared.document(id: id) != nil else { return }
 
         openDocumentId = id
+        openChapter = chapter
         // The reader picks up whatever was last opened, so the order matters:
         // remember it first, then switch.
         LearningStore.shared.markReading(documentId: id)
@@ -1542,11 +1653,22 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
     }
 
     /// Create a note and open it in the notes module.
-    private func startNote(forDocumentId id: String, title: String) {
-        let note = LearningStore.shared.addNote(documentId: id, documentTitle: title)
+    ///
+    /// A note made from the reader remembers the chapter it was taken from,
+    /// so it can be found again in the book it came from.
+    private func startNote(forDocumentId id: String, title: String, chapter: Int = 0) {
+        let note = LearningStore.shared.addNote(documentId: id, documentTitle: title, chapter: chapter)
         showModule("notes")
         notesView.show(notes: LearningStore.shared.allNotes)
         notesView.select(noteId: note.id)
+    }
+
+    /// Fill the review desk with the notes that are due.
+    private func refreshReview() {
+        let due = LearningStore.shared.dueNotes()
+        let upcoming = LearningStore.shared.notesNotDue()
+        let total = LearningStore.shared.allNotes.count
+        reviewView.show(due: due, total: total, upcoming: upcoming.count)
     }
 
     private func filterNotes(_ query: String) {
@@ -1727,6 +1849,7 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
             case .library: subtitle = "Your documents"
             case .reader: subtitle = "Read a briefing"
             case .notes: subtitle = "Notes you have written"
+            case .review: subtitle = "Remember your notes"
             case .app: subtitle = current.tagline
             case .planned: subtitle = ""
             }

@@ -122,4 +122,83 @@ enum Exporter {
         if name.count > 60 { name = String(name.prefix(60)) }
         return name.isEmpty ? "SlothRead Export" : name
     }
+
+    // MARK: - Notes
+
+    /// Every note, as one Markdown document.
+    ///
+    /// Notes are the thing the user wrote, so they are the thing worth
+    /// getting out of the app. Grouped by document, because that is how
+    /// they were made and how they are read.
+    static func notesMarkdown(_ notes: [StudyNote], now: Date = Date()) -> String {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .long
+        formatter.timeStyle = .none
+
+        var out = "# Sloth Suite — Notes\n\n"
+        out += "\(notes.count) note\(notes.count == 1 ? "" : "s"), exported \(formatter.string(from: now)).\n"
+
+        if notes.isEmpty {
+            out += "\nThere are no notes yet.\n"
+            return out
+        }
+
+        // Group by document, keeping the documents in the order they were
+        // first written about.
+        var order: [String] = []
+        var groups: [String: [StudyNote]] = [:]
+        for note in notes {
+            let key = note.documentTitle.isEmpty ? "Unfiled" : note.documentTitle
+            if groups[key] == nil {
+                groups[key] = []
+                order.append(key)
+            }
+            groups[key]?.append(note)
+        }
+
+        for title in order {
+            out += "\n## \(title)\n"
+            for note in groups[title] ?? [] {
+                out += "\n### \(note.chapterLabel)\n\n"
+                out += note.body.isEmpty ? "*(empty note)*\n" : note.body + "\n"
+                let stamp = formatter.string(from: note.updatedAt)
+                out += "\n*Written \(stamp)*\n"
+            }
+        }
+
+        return out
+    }
+
+    /// Write the notes to a Markdown file the user chooses.
+    static func writeNotes(_ notes: [StudyNote],
+                           completion: @escaping (Result<URL, Error>) -> Void) {
+        guard !notes.isEmpty else {
+            completion(.failure(ExportError.noFiles))
+            return
+        }
+
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = "Sloth Suite Notes.md"
+        panel.allowedContentTypes = [.plainText]
+        panel.canCreateDirectories = true
+        panel.message = "Choose where to save your notes."
+        panel.directoryURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
+
+        panel.begin { response in
+            guard response == .OK, let url = panel.url else {
+                completion(.failure(ExportError.noFiles))
+                return
+            }
+
+            do {
+                let text = Self.notesMarkdown(notes)
+                try text.write(to: url, atomically: true, encoding: .utf8)
+                Log.shared.write("exported \(notes.count) note(s) to \(url.path)")
+                completion(.success(url))
+            } catch {
+                completion(.failure(ExportError.writeFailed(
+                    "Could not write the notes: \(error.localizedDescription)")))
+            }
+        }
+    }
 }

@@ -33,6 +33,9 @@ enum Typography {
     /// Long-form reading text.
     static let readingSize: CGFloat = 16.5
 
+    /// A flashcard prompt — the thing you are asked to remember.
+    static let promptSize: CGFloat = 21
+
     // MARK: - Fonts
 
     static func display(weight: NSFont.Weight = .bold) -> NSFont {
@@ -63,6 +66,11 @@ enum Typography {
     /// tight leading is worse than a well-set sans, so the sans stays.
     static func reading(weight: NSFont.Weight = .regular) -> NSFont {
         .systemFont(ofSize: readingSize, weight: weight)
+    }
+
+    /// The font used for a review prompt.
+    static func prompt(weight: NSFont.Weight = .medium) -> NSFont {
+        .systemFont(ofSize: promptSize, weight: weight)
     }
 
     /// The app's own title face.

@@ -108,6 +108,9 @@ final class LibraryView: NSView, NSCollectionViewDataSource, NSCollectionViewDel
     var onToggleRead: ((LibraryDocument) -> Void)?
     var onAddNote: ((LibraryDocument) -> Void)?
     var onFilterChange: ((LibraryFilter) -> Void)?
+    var onSortChange: ((LibrarySort) -> Void)?
+    /// Called with true to mark everything read, false to mark it unread.
+    var onBulkRead: ((Bool) -> Void)?
     var onContinue: (() -> Void)?
 
     private let collectionView = NSCollectionView()
@@ -122,6 +125,8 @@ final class LibraryView: NSView, NSCollectionViewDataSource, NSCollectionViewDel
     private let header = NSView()
     private let filterRow = NSView()
     private let continueButton = NSButton(title: "Continue reading", target: nil, action: nil)
+    private let sortButton = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let bulkReadButton = NSButton(title: "Mark all read", target: nil, action: nil)
     private var filterButtons: [LibraryFilter: FilterChip] = [:]
 
     private var documents: [LibraryDocument] = []
@@ -180,9 +185,23 @@ final class LibraryView: NSView, NSCollectionViewDataSource, NSCollectionViewDel
         addButton.setColoredTitle("Add Document", color: Palette.accent,
                                   font: Typography.body(weight: .medium))
 
+        // The sort control. A library that cannot be put in order is a pile.
+        sortButton.translatesAutoresizingMaskIntoConstraints = false
+        sortButton.controlSize = .regular
+        sortButton.font = Typography.body()
+        sortButton.target = self
+        sortButton.action = #selector(sortChanged)
+        sortButton.toolTip = "Sort the library"
+        for candidate in LibrarySort.allCases {
+            let item = sortButton.menu?.addItem(withTitle: candidate.title, action: nil, keyEquivalent: "")
+            item?.image = NSImage(systemSymbolName: candidate.symbol, accessibilityDescription: nil)
+            item?.representedObject = candidate.rawValue
+        }
+
         header.addSubview(titleLabel)
         header.addSubview(countLabel)
         header.addSubview(searchField)
+        header.addSubview(sortButton)
         header.addSubview(addButton)
 
         titleLabel.leadingAnchor.constraint(equalTo: header.leadingAnchor).isActive = true
@@ -197,7 +216,11 @@ final class LibraryView: NSView, NSCollectionViewDataSource, NSCollectionViewDel
         addButton.centerYAnchor.constraint(equalTo: header.centerYAnchor).isActive = true
         addButton.setContentCompressionResistancePriority(.required, for: .horizontal)
 
-        searchField.trailingAnchor.constraint(equalTo: addButton.leadingAnchor, constant: -14).isActive = true
+        sortButton.trailingAnchor.constraint(equalTo: addButton.leadingAnchor, constant: -10).isActive = true
+        sortButton.centerYAnchor.constraint(equalTo: header.centerYAnchor).isActive = true
+        sortButton.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+        searchField.trailingAnchor.constraint(equalTo: sortButton.leadingAnchor, constant: -14).isActive = true
         searchField.centerYAnchor.constraint(equalTo: header.centerYAnchor).isActive = true
         searchField.leadingAnchor.constraint(greaterThanOrEqualTo: countLabel.trailingAnchor, constant: 16).isActive = true
 
@@ -239,20 +262,43 @@ final class LibraryView: NSView, NSCollectionViewDataSource, NSCollectionViewDel
         continueButton.translatesAutoresizingMaskIntoConstraints = false
         continueButton.isHidden = true
 
+        // Mark everything read — or unread again. Ticking every card one by
+        // one is a waste of a morning.
+        bulkReadButton.font = Typography.body()
+        bulkReadButton.bezelStyle = .inline
+        bulkReadButton.isBordered = false
+        bulkReadButton.contentTintColor = Palette.green
+        bulkReadButton.setColoredTitle("Mark all read", color: Palette.green,
+                                       font: Typography.body())
+        bulkReadButton.image = NSImage(systemSymbolName: "checkmark.circle", accessibilityDescription: nil)
+        bulkReadButton.imagePosition = .imageLeading
+        bulkReadButton.imageHugsTitle = true
+        bulkReadButton.target = self
+        bulkReadButton.action = #selector(bulkReadPressed)
+        bulkReadButton.translatesAutoresizingMaskIntoConstraints = false
+
         // The chips sit on the left, the continue button on the right, in a
         // plain container rather than a stack view, so neither has to guess
         // how to share the row.
         filterRow.translatesAutoresizingMaskIntoConstraints = false
         filterRow.addSubview(filterBar)
+        filterRow.addSubview(bulkReadButton)
         filterRow.addSubview(continueButton)
 
         filterBar.leadingAnchor.constraint(equalTo: filterRow.leadingAnchor).isActive = true
         filterBar.topAnchor.constraint(equalTo: filterRow.topAnchor).isActive = true
         filterBar.bottomAnchor.constraint(equalTo: filterRow.bottomAnchor).isActive = true
 
+        // The bulk button sits next to the chips. It cannot sit to the left
+        // of the continue button, because a hidden button still takes up its
+        // room in the layout and would leave a gap on the right.
+        bulkReadButton.leadingAnchor.constraint(equalTo: filterBar.trailingAnchor, constant: 16).isActive = true
+        bulkReadButton.centerYAnchor.constraint(equalTo: filterRow.centerYAnchor).isActive = true
+        bulkReadButton.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
         continueButton.trailingAnchor.constraint(equalTo: filterRow.trailingAnchor).isActive = true
         continueButton.centerYAnchor.constraint(equalTo: filterRow.centerYAnchor).isActive = true
-        continueButton.leadingAnchor.constraint(greaterThanOrEqualTo: filterBar.trailingAnchor, constant: 12).isActive = true
+        continueButton.leadingAnchor.constraint(greaterThanOrEqualTo: bulkReadButton.trailingAnchor, constant: 12).isActive = true
 
         // Collection view
         let layout = LibraryGridLayout()
@@ -336,6 +382,14 @@ final class LibraryView: NSView, NSCollectionViewDataSource, NSCollectionViewDel
             ? ""
             : "\(documents.count) of \(total) document\(total == 1 ? "" : "s")"
 
+        // The sort control follows the store, so it always says what the
+        // order actually is.
+        setSort(LibraryStore.shared.sort)
+
+        // The bulk button offers whichever way round is useful.
+        let unread = LearningStore.shared.unreadDocuments(from: LibraryStore.shared.documents)
+        refreshBulkButton(unreadCount: unread.count)
+
         // An empty result can mean "no documents at all" or "this filter has
         // nothing" — the two need different words.
         if total == 0 {
@@ -408,6 +462,46 @@ final class LibraryView: NSView, NSCollectionViewDataSource, NSCollectionViewDel
 
     @objc private func addPressed() {
         onAdd?()
+    }
+
+    // MARK: - Sorting
+
+    /// Show the order that is in force.
+    func setSort(_ sort: LibrarySort) {
+        let index = LibrarySort.allCases.firstIndex(of: sort) ?? 0
+        guard sortButton.indexOfSelectedItem != index else { return }
+        sortButton.selectItem(at: index)
+    }
+
+    @objc private func sortChanged() {
+        guard let raw = sortButton.selectedItem?.representedObject as? String,
+              let sort = LibrarySort(rawValue: raw) else { return }
+        onSortChange?(sort)
+    }
+
+    // MARK: - Bulk read state
+
+    /// Say whether the button will mark things read or unread.
+    ///
+    /// The button does whichever is useful: with unread documents it offers
+    /// to mark them read, and when everything is read it offers to undo that.
+    func refreshBulkButton(unreadCount: Int) {
+        let markRead = unreadCount > 0
+        let title = markRead ? "Mark all read" : "Mark all unread"
+        bulkReadButton.setColoredTitle(title,
+                                       color: markRead ? Palette.green : Palette.rose,
+                                       font: Typography.body())
+        bulkReadButton.contentTintColor = markRead ? Palette.green : Palette.rose
+        bulkReadButton.image = NSImage(systemSymbolName: markRead ? "checkmark.circle" : "arrow.uturn.backward.circle",
+                                       accessibilityDescription: nil)
+        bulkReadButton.toolTip = markRead
+            ? "Mark every document as read"
+            : "Mark every document as unread again"
+    }
+
+    @objc private func bulkReadPressed() {
+        let unread = LearningStore.shared.unreadDocuments(from: LibraryStore.shared.documents)
+        onBulkRead?(unread.isEmpty ? false : true)
     }
 
     // MARK: - Collection view
@@ -536,6 +630,7 @@ final class LibraryCardItem: NSCollectionViewItem {
     private let authorLabel = NSTextField(labelWithString: "")
     private let statusDot = NSView()
     private let statusLabel = NSTextField(labelWithString: "")
+    private let progressLabel = NSTextField(labelWithString: "")
     private let menuButton = NSButton(title: "", target: nil, action: nil)
     private let starButton = NSButton(title: "", target: nil, action: nil)
     private let readButton = NSButton(title: "", target: nil, action: nil)
@@ -594,6 +689,14 @@ final class LibraryCardItem: NSCollectionViewItem {
         statusLabel.lineBreakMode = .byTruncatingTail
         statusLabel.translatesAutoresizingMaskIntoConstraints = false
 
+        // How far through the document the reader is. Without this the card
+        // cannot say whether a book has been started, and a library of
+        // half-read books looks exactly like a library of unread ones.
+        progressLabel.font = Typography.caption(weight: .medium)
+        progressLabel.textColor = Palette.teal
+        progressLabel.lineBreakMode = .byTruncatingTail
+        progressLabel.translatesAutoresizingMaskIntoConstraints = false
+
         menuButton.image = NSImage(systemSymbolName: "ellipsis.circle", accessibilityDescription: "More")
         menuButton.bezelStyle = .inline
         menuButton.isBordered = false
@@ -626,6 +729,7 @@ final class LibraryCardItem: NSCollectionViewItem {
         card.addSubview(authorLabel)
         card.addSubview(statusDot)
         card.addSubview(statusLabel)
+        card.addSubview(progressLabel)
         card.addSubview(menuButton)
         card.addSubview(starButton)
         card.addSubview(readButton)
@@ -667,9 +771,19 @@ final class LibraryCardItem: NSCollectionViewItem {
         statusDot.heightAnchor.constraint(equalToConstant: 6).isActive = true
 
         statusLabel.leadingAnchor.constraint(equalTo: statusDot.trailingAnchor, constant: 6).isActive = true
-        statusLabel.trailingAnchor.constraint(lessThanOrEqualTo: readButton.leadingAnchor, constant: -8).isActive = true
+        statusLabel.trailingAnchor.constraint(lessThanOrEqualTo: progressLabel.leadingAnchor, constant: -10).isActive = true
         statusLabel.topAnchor.constraint(greaterThanOrEqualTo: authorLabel.bottomAnchor, constant: 6).isActive = true
         statusLabel.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -11).isActive = true
+        statusLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+        // The progress sits between the status and the read button. Both
+        // labels give up room first, so a long title never pushes the card
+        // out of shape.
+        progressLabel.leadingAnchor.constraint(greaterThanOrEqualTo: statusLabel.trailingAnchor, constant: 4).isActive = true
+        progressLabel.trailingAnchor.constraint(lessThanOrEqualTo: readButton.leadingAnchor, constant: -8).isActive = true
+        progressLabel.centerYAnchor.constraint(equalTo: statusLabel.centerYAnchor).isActive = true
+        progressLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        progressLabel.setContentHuggingPriority(.defaultHigh, for: .horizontal)
 
         readButton.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -10).isActive = true
         readButton.centerYAnchor.constraint(equalTo: statusLabel.centerYAnchor).isActive = true
@@ -702,6 +816,22 @@ final class LibraryCardItem: NSCollectionViewItem {
         }
         statusLabel.stringValue = statusText
         statusColour = colour
+
+        // How far through the document the reader is.
+        //
+        // The chapter count comes from the briefing, and the place comes from
+        // the suite's own memory of where the reader stopped.
+        let position = LearningStore.shared.position(for: document.id)
+        if let position, document.chapters > 0 {
+            let chapter = max(1, position.chapter)
+            progressLabel.stringValue = "Ch \(chapter) of \(document.chapters)"
+            progressLabel.isHidden = false
+            progressLabel.toolTip = "You stopped in chapter \(chapter) of \(document.chapters)"
+        } else {
+            progressLabel.stringValue = ""
+            progressLabel.isHidden = true
+            progressLabel.toolTip = nil
+        }
 
         // The badge takes the colour of the file type, so the grid reads at a
         // glance: violet for a book, blue for a paper.

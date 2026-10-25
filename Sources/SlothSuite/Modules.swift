@@ -16,6 +16,8 @@ enum ModuleKind {
     case reader
     /// The native notes module.
     case notes
+    /// The review desk — spaced repetition over the notes.
+    case review
     /// The wrapped web app — the synthesis engine.
     case app
     /// Reserved for a module that does not exist yet.
@@ -41,7 +43,7 @@ enum SuiteModules {
         SuiteModule(id: "library", title: "Library", symbol: "books.vertical.fill", kind: .library),
         SuiteModule(id: "reader", title: "Reader", symbol: "text.book.closed.fill", kind: .reader),
         SuiteModule(id: "notes", title: "Notes", symbol: "note.text", kind: .notes),
-        SuiteModule(id: "review", title: "Review", symbol: "brain.head.profile", kind: .planned),
+        SuiteModule(id: "review", title: "Review", symbol: "brain.head.profile", kind: .review),
         SuiteModule(id: "app", title: "App", symbol: "macwindow.on.rectangle", kind: .app)
     ]
 
@@ -127,6 +129,30 @@ enum LibraryFilter: String, CaseIterable {
     }
 }
 
+/// How the library list is sorted.
+enum LibrarySort: String, CaseIterable {
+    /// Newest first. The default, because a new document is usually why
+    /// you came here.
+    case recent = "Recent"
+    /// By title, A to Z.
+    case title = "Title"
+    /// By author, A to Z.
+    case author = "Author"
+    /// The longest documents first — the ones worth the time.
+    case longest = "Longest"
+
+    var title: String { rawValue }
+
+    var symbol: String {
+        switch self {
+        case .recent: return "clock"
+        case .title: return "textformat.abc"
+        case .author: return "person"
+        case .longest: return "arrow.up.right.square"
+        }
+    }
+}
+
 /// Fetches the library and tells whoever is watching when it changes.
 final class LibraryStore {
     static let shared = LibraryStore()
@@ -134,6 +160,7 @@ final class LibraryStore {
     private(set) var documents: [LibraryDocument] = []
     private(set) var query = ""
     private(set) var filter: LibraryFilter = .all
+    private(set) var sort: LibrarySort = .recent
     var onChange: (([LibraryDocument]) -> Void)?
 
     private var timer: Timer?
@@ -159,12 +186,37 @@ final class LibraryStore {
             }
         }
 
-        // Favourites float to the top, then newest first.
+        // Favourites float to the top — but only when the order has not been
+        // asked for. Sorting by title and then putting favourites on top
+        // would not be the order that was asked for.
         result.sort { left, right in
-            let leftFavourite = learning.isFavourite(documentId: left.id)
-            let rightFavourite = learning.isFavourite(documentId: right.id)
-            if leftFavourite != rightFavourite { return leftFavourite }
-            return left.createdAt > right.createdAt
+            if sort == .recent {
+                let leftFavourite = learning.isFavourite(documentId: left.id)
+                let rightFavourite = learning.isFavourite(documentId: right.id)
+                if leftFavourite != rightFavourite { return leftFavourite }
+                return left.createdAt > right.createdAt
+            }
+
+            switch sort {
+            case .recent:
+                return left.createdAt > right.createdAt
+            case .title:
+                return left.title.localizedCaseInsensitiveCompare(right.title) == .orderedAscending
+            case .author:
+                // A document with no author is sorted by its title, rather
+                // than by an empty string that would put it first.
+                let leftName = left.author.isEmpty ? left.title : left.author
+                let rightName = right.author.isEmpty ? right.title : right.author
+                if leftName == rightName {
+                    return left.title.localizedCaseInsensitiveCompare(right.title) == .orderedAscending
+                }
+                return leftName.localizedCaseInsensitiveCompare(rightName) == .orderedAscending
+            case .longest:
+                if left.words == right.words {
+                    return left.title.localizedCaseInsensitiveCompare(right.title) == .orderedAscending
+                }
+                return left.words > right.words
+            }
         }
 
         return result
@@ -177,6 +229,11 @@ final class LibraryStore {
 
     func setFilter(_ newFilter: LibraryFilter) {
         filter = newFilter
+        onChange?(filtered)
+    }
+
+    func setSort(_ newSort: LibrarySort) {
+        sort = newSort
         onChange?(filtered)
     }
 

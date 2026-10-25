@@ -25,6 +25,14 @@ final class ReaderView: NSView {
     /// The user scrolled to a different chapter — used to remember where they were.
     var onChapterChanged: ((Int) -> Void)?
 
+    /// Called with the chapter and how far down it the reader is.
+    ///
+    /// Reported when the scrolling settles, not on every pixel.
+    var onPositionChanged: ((Int, Double) -> Void)?
+
+    /// The pending position report, if a newer one has replaced it.
+    private var positionWork: DispatchWorkItem?
+
     // MARK: Subviews
 
     private let headerView = NSView()
@@ -321,7 +329,11 @@ final class ReaderView: NSView {
     // MARK: - Content
 
     /// Render a briefing.
-    func show(briefing: Briefing) {
+    ///
+    /// `position` is where the reader had got to last time. Passing it puts
+    /// them back there instead of at the top, which is the whole point of
+    /// remembering a place.
+    func show(briefing: Briefing, restoring position: ReadingPosition? = nil) {
         self.briefing = briefing
 
         titleLabel.stringValue = briefing.title
@@ -352,6 +364,11 @@ final class ReaderView: NSView {
         headerView.isHidden = false
         bodyScroll.isHidden = false
         overlay.isHidden = true
+
+        // Put the reader back where they were.
+        if let position, position.chapter > 0 {
+            moveToChapter(position.chapter, fraction: position.scroll, report: false)
+        }
     }
 
     /// Show a spinner-ish "Loading…" state for a document title.
@@ -528,6 +545,7 @@ final class ReaderView: NSView {
             updatePillSelection()
             bodyScroll.contentView.scroll(to: .zero)
             onChapterChanged?(0)
+            schedulePositionReport()
             return
         }
 
@@ -549,6 +567,67 @@ final class ReaderView: NSView {
         updatePillSelection()
         bodyScroll.contentView.scroll(to: NSPoint(x: 0, y: target))
         onChapterChanged?(index)
+        schedulePositionReport()
+    }
+
+    /// Move to a chapter, and to a fraction of the way down it.
+    ///
+    /// The fraction is what makes the reader come back to the same *line*,
+    /// not just the same chapter. It is measured against the chapter's own
+    /// height, so it survives a change of window size.
+    private func moveToChapter(_ index: Int, fraction: Double, report: Bool) {
+        guard index > 0, index - 1 < chapterRanges.count else { return }
+        guard let span = chapterSpan(index) else { return }
+
+        let clamped = min(max(fraction, 0), 1)
+        let target = span.start + span.height * clamped
+
+        currentChapter = index
+        lastReportedChapter = index
+        updatePillSelection()
+        bodyScroll.contentView.scroll(to: NSPoint(x: 0, y: target))
+        if report { onChapterChanged?(index) }
+    }
+
+    /// The vertical span of a chapter, in the scroll view's coordinates.
+    ///
+    /// A chapter ends where the next one begins — or at the end of the text,
+    /// for the last one.
+    private func chapterSpan(_ index: Int) -> (start: CGFloat, height: CGFloat)? {
+        guard index > 0, index - 1 < chapterRanges.count else { return nil }
+        guard let manager = textView.layoutManager, let container = textView.textContainer else { return nil }
+
+        manager.ensureLayout(for: container)
+
+        let range = chapterRanges[index - 1]
+        let glyphRange = manager.glyphRange(forCharacterRange: range, actualCharacterRange: nil)
+        let rect = manager.boundingRect(forGlyphRange: glyphRange, in: container)
+        guard rect.height > 0 else { return nil }
+
+        // The container sits inside the text view's inset, so the heading's
+        // place in the content is that much further down.
+        let start = rect.minY + textView.textContainerInset.height
+
+        let end: CGFloat
+        if index < chapterRanges.count {
+            let nextRange = chapterRanges[index]
+            let nextGlyph = manager.glyphRange(forCharacterRange: nextRange, actualCharacterRange: nil)
+            let nextRect = manager.boundingRect(forGlyphRange: nextGlyph, in: container)
+            end = nextRect.minY + textView.textContainerInset.height
+        } else {
+            end = start + rect.height
+        }
+
+        guard end > start else { return nil }
+        return (start, end - start)
+    }
+
+    /// How far down the current chapter the reader is, from 0 to 1.
+    private func scrollFraction() -> Double {
+        guard let span = chapterSpan(currentChapter) else { return 0 }
+        let visible = bodyScroll.contentView.documentVisibleRect
+        let offset = visible.minY - span.start
+        return min(max(offset / span.height, 0), 1)
     }
 
     // MARK: - Tracking
@@ -558,12 +637,42 @@ final class ReaderView: NSView {
         // Only report a chapter when it really changed: scrolling fires this
         // on every pixel, and the controller does not need a stream of
         // identical numbers.
-        guard index != lastReportedChapter else { return }
-        lastReportedChapter = index
-        currentChapter = index
-        updatePillSelection()
-        onChapterChanged?(index)
+        if index != lastReportedChapter {
+            lastReportedChapter = index
+            currentChapter = index
+            updatePillSelection()
+            onChapterChanged?(index)
+        }
+        schedulePositionReport()
     }
+
+    /// Report where the reader is, once the scrolling has settled.
+    ///
+    /// Scrolling fires on every pixel, so the position is only reported when
+    /// the reader stops moving — otherwise the store would be rewritten
+    /// dozens of times a second.
+    private func schedulePositionReport() {
+        positionWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.onPositionChanged?(self.currentChapter, self.scrollFraction())
+        }
+        positionWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6, execute: work)
+    }
+
+    /// Report the position now, without waiting for the scrolling to settle.
+    ///
+    /// Called when the reader is put away, so the place is saved even if the
+    /// reader is still moving when they leave.
+    func flushPosition() {
+        positionWork?.cancel()
+        positionWork = nil
+        onPositionChanged?(currentChapter, scrollFraction())
+    }
+
+    /// The chapter the reader is looking at.
+    var currentChapterIndex: Int { currentChapter }
 
     /// Which chapter is the reader looking at?
     private func chapterAtTopOfView() -> Int {

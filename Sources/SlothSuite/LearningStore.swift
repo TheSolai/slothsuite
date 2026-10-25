@@ -4,9 +4,6 @@ import Foundation
 // MARK: - Notes
 
 /// A note the user wrote, anchored to a document.
-///
-/// Notes are the first thing that turns a library into a learning desk: the
-/// books are what you read, the notes are what you keep.
 struct StudyNote: Codable, Identifiable, Equatable {
     var id: String
     var documentId: String
@@ -14,6 +11,48 @@ struct StudyNote: Codable, Identifiable, Equatable {
     var body: String
     var createdAt: Date
     var updatedAt: Date
+    /// The chapter the note was taken from.
+    ///
+    /// Zero is the overview that comes before the first chapter. Notes made
+    /// before this was recorded simply have no chapter, and are treated as
+    /// belonging to the overview.
+    var chapter: Int = 0
+
+    init(id: String,
+         documentId: String,
+         documentTitle: String,
+         body: String,
+         createdAt: Date,
+         updatedAt: Date,
+         chapter: Int = 0) {
+        self.id = id
+        self.documentId = documentId
+        self.documentTitle = documentTitle
+        self.body = body
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt
+        self.chapter = chapter
+    }
+
+    /// Read a note written by an older version of the suite.
+    ///
+    /// The chapter was not recorded then, so it is read as zero rather than
+    /// failing — a note that cannot be read would take the whole file with
+    /// it, and with it every other note.
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        documentId = try container.decodeIfPresent(String.self, forKey: .documentId) ?? ""
+        documentTitle = try container.decodeIfPresent(String.self, forKey: .documentTitle) ?? ""
+        body = try container.decodeIfPresent(String.self, forKey: .body) ?? ""
+        createdAt = try container.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date()
+        updatedAt = try container.decodeIfPresent(Date.self, forKey: .updatedAt) ?? Date()
+        chapter = try container.decodeIfPresent(Int.self, forKey: .chapter) ?? 0
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id, documentId, documentTitle, body, createdAt, updatedAt, chapter
+    }
 
     /// The first line, for a list row.
     var preview: String {
@@ -26,6 +65,35 @@ struct StudyNote: Codable, Identifiable, Equatable {
         let text = preview.isEmpty ? "(empty note)" : preview
         return "\(documentTitle) — \(text)"
     }
+
+    /// Where this note came from, in words.
+    var chapterLabel: String {
+        chapter > 0 ? "Chapter \(chapter)" : "Overview"
+    }
+}
+
+// MARK: - Reading position
+
+/// Where the reader had got to in a document.
+struct ReadingPosition: Codable, Equatable {
+    /// The chapter. Zero is the overview before the first chapter.
+    var chapter: Int = 0
+    /// How far down that chapter the reader had got, from 0 to 1.
+    var scroll: Double = 0
+    /// When it was last read.
+    var updatedAt: Date = Date()
+}
+
+// MARK: - Review
+
+/// How a note is going in spaced repetition.
+struct ReviewState: Codable, Equatable {
+    /// How many times in a row the note has been remembered.
+    var repetitions: Int = 0
+    /// When it is next due.
+    var dueAt: Date = Date()
+    /// When it was last answered.
+    var lastReviewedAt: Date?
 }
 
 // MARK: - Learning state
@@ -45,6 +113,32 @@ struct LearningState: Codable, Equatable {
     var lastReadChapter: Int = 0
     /// Notes, newest last.
     var notes: [StudyNote] = []
+    /// Where the reader had got to in each document.
+    var positions: [String: ReadingPosition] = [:]
+    /// The spaced-repetition state of each note.
+    var reviews: [String: ReviewState] = [:]
+
+    init() {}
+
+    /// Read a file written by an older version of the suite.
+    ///
+    /// Everything the file does not have is simply empty. A file that cannot
+    /// be read at all would throw away the user's notes, so the parts that
+    /// are new are the parts that are allowed to be missing.
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        favourites = try container.decodeIfPresent(Set<String>.self, forKey: .favourites) ?? []
+        read = try container.decodeIfPresent(Set<String>.self, forKey: .read) ?? []
+        lastReadDocumentId = try container.decodeIfPresent(String.self, forKey: .lastReadDocumentId)
+        lastReadChapter = try container.decodeIfPresent(Int.self, forKey: .lastReadChapter) ?? 0
+        notes = try container.decodeIfPresent([StudyNote].self, forKey: .notes) ?? []
+        positions = try container.decodeIfPresent([String: ReadingPosition].self, forKey: .positions) ?? [:]
+        reviews = try container.decodeIfPresent([String: ReviewState].self, forKey: .reviews) ?? [:]
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case favourites, read, lastReadDocumentId, lastReadChapter, notes, positions, reviews
+    }
 }
 
 // MARK: - Store
@@ -218,10 +312,6 @@ final class LearningStore {
         commit()
     }
 
-    var unreadCount: Int {
-        withState { $0.read.count }
-    }
-
     // MARK: Continue reading
 
     func markReading(documentId: String, chapter: Int = 0) {
@@ -233,6 +323,74 @@ final class LearningStore {
     }
 
     var lastReadDocumentId: String? { withState { $0.lastReadDocumentId } }
+
+    // MARK: Reading position
+
+    /// Where the reader had got to in a document.
+    ///
+    /// Every document keeps its own place. Remembering only the last one
+    /// meant that reading a second book lost your place in the first.
+    func position(for documentId: String) -> ReadingPosition? {
+        withState { $0.positions[documentId] }
+    }
+
+    var allPositions: [String: ReadingPosition] {
+        withState { $0.positions }
+    }
+
+    /// Remember where the reader is in a document.
+    ///
+    /// The scroll is a fraction of the way down the chapter rather than a
+    /// point, so it still lands in the right place when the window is a
+    /// different size.
+    ///
+    /// This is written to disk but **not announced**: the place changes on
+    /// every scroll, and telling the whole interface about it would redraw
+    /// the library and the notes for nothing. The card shows the chapter,
+    /// and that changes are announced by `markReading`.
+    func setPosition(documentId: String, chapter: Int, scroll: Double) {
+        let clamped = min(max(scroll, 0), 1)
+        mutate { state in
+            state.positions[documentId] = ReadingPosition(
+                chapter: chapter, scroll: clamped, updatedAt: Date()
+            )
+            state.lastReadDocumentId = documentId
+            state.lastReadChapter = chapter
+        }
+        save()
+    }
+
+    /// Forget where the reader was in a document.
+    func clearPosition(documentId: String) {
+        _ = mutate { $0.positions.removeValue(forKey: documentId) }
+        save()
+    }
+
+    // MARK: Bulk read state
+
+    /// Mark documents as read, or unread, all at once.
+    ///
+    /// Ticking every card one by one is a waste of a morning.
+    func setRead(_ isRead: Bool, documentIds: [String]) {
+        guard !documentIds.isEmpty else { return }
+        mutate { state in
+            for id in documentIds {
+                if isRead {
+                    state.read.insert(id)
+                } else {
+                    state.read.remove(id)
+                }
+            }
+        }
+        commit()
+    }
+
+    /// The documents that are not marked as read yet.
+    func unreadDocuments(from documents: [LibraryDocument]) -> [LibraryDocument] {
+        withState { state in
+            documents.filter { !state.read.contains($0.id) }
+        }
+    }
 
     // MARK: Notes
 
@@ -257,7 +415,10 @@ final class LearningStore {
 
     /// Create a note, optionally anchored to a document.
     @discardableResult
-    func addNote(documentId: String? = nil, documentTitle: String = "", body: String = "") -> StudyNote {
+    func addNote(documentId: String? = nil,
+                 documentTitle: String = "",
+                 body: String = "",
+                 chapter: Int = 0) -> StudyNote {
         let now = Date()
         let note = StudyNote(
             id: UUID().uuidString,
@@ -265,7 +426,8 @@ final class LearningStore {
             documentTitle: documentTitle,
             body: body,
             createdAt: now,
-            updatedAt: now
+            updatedAt: now,
+            chapter: chapter
         )
         mutate { $0.notes.append(note) }
         commit()
@@ -284,7 +446,12 @@ final class LearningStore {
     }
 
     func deleteNote(id: String) {
-        mutate { $0.notes.removeAll { $0.id == id } }
+        mutate { state in
+            state.notes.removeAll { $0.id == id }
+            // The note's place in the review schedule goes with it. Left
+            // behind, it is a card for a note that no longer exists.
+            state.reviews.removeValue(forKey: id)
+        }
         commit()
     }
 
@@ -311,4 +478,77 @@ final class LearningStore {
 
         return results
     }
+
+    // MARK: Review
+
+    /// How long a note waits between reviews, in days.
+    ///
+    /// The first few come back quickly, because a note you have just written
+    /// is fresh; after that they spread out, because a note you have
+    /// remembered several times does not need asking every day.
+    static let reviewIntervals: [Int] = [1, 3, 7, 16, 35]
+
+    /// How long a forgotten note waits before it comes back.
+    ///
+    /// Ten minutes: long enough that you are not shown it again in the same
+    /// breath, short enough that it comes back before you have closed the
+    /// app.
+    static let lapseInterval: TimeInterval = 10 * 60
+
+    /// The notes that are due to be reviewed now, soonest first.
+    func dueNotes(now: Date = Date()) -> [StudyNote] {
+        let states = withState { $0.reviews }
+        let notes = allNotes
+
+        // A note nobody has reviewed is due straight away. Otherwise it is
+        // due when its schedule says so.
+        let due = notes.filter { note in
+            guard let state = states[note.id] else { return true }
+            return state.dueAt <= now
+        }
+
+        return due.sorted { left, right in
+            let leftDue = states[left.id]?.dueAt ?? .distantPast
+            let rightDue = states[right.id]?.dueAt ?? .distantPast
+            if leftDue != rightDue { return leftDue < rightDue }
+            return left.updatedAt < right.updatedAt
+        }
+    }
+
+    /// The notes that are not due yet.
+    func notesNotDue(now: Date = Date()) -> [StudyNote] {
+        let states = withState { $0.reviews }
+        return allNotes.filter { note in
+            guard let state = states[note.id] else { return false }
+            return state.dueAt > now
+        }
+    }
+
+    func reviewState(for noteId: String) -> ReviewState? {
+        withState { $0.reviews[noteId] }
+    }
+
+    /// Record the answer to a review card.
+    ///
+    /// Remembering it moves the note further out; forgetting it brings it
+    /// back in ten minutes and starts the count again.
+    func recordReview(noteId: String, remembered: Bool, now: Date = Date()) {
+        mutate { state in
+            let previous = state.reviews[noteId] ?? ReviewState()
+            let repetitions = remembered ? previous.repetitions + 1 : 0
+            let days = Self.reviewIntervals[min(repetitions, Self.reviewIntervals.count - 1)]
+            let dueAt = remembered
+                ? now.addingTimeInterval(TimeInterval(days) * 24 * 60 * 60)
+                : now.addingTimeInterval(Self.lapseInterval)
+            state.reviews[noteId] = ReviewState(
+                repetitions: repetitions,
+                dueAt: dueAt,
+                lastReviewedAt: now
+            )
+        }
+        commit()
+    }
+
+    /// How many notes are waiting to be reviewed.
+    var dueCount: Int { dueNotes().count }
 }

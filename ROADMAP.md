@@ -242,6 +242,58 @@ reader, the notes and the audio window were all rendered that way and read
 correctly — dark cards, readable titles, badges and chips in their dark
 variants.
 
+## Phase 7 — the fourth ten: a learning desk that remembers
+
+*"Now make 10 QoL improvements."* Every one of these was a gap found by
+reading the code rather than by using it — things the suite did not do, or
+did not do where the user would look for them.
+
+1. **The reader puts you back where you were.** The chapter was recorded and
+   never used: `show(briefing:)` set the chapter to zero every single time.
+   Now the reader opens at the chapter you left.
+2. **Every document keeps its own place.** Only the last document's position
+   was remembered, so reading a second book lost your place in the first.
+   Positions are now per document.
+3. **The place includes the line.** The scroll is remembered as a fraction of
+   the chapter, so it lands in the same *line*, not just the same chapter,
+   and survives a change of window size.
+4. **A note remembers the chapter it came from.** A note taken in the reader
+   records the chapter, and opening it from the note list goes straight
+   there.
+5. **The library card says where you got to.** "Ch 3 of 10", so a half-read
+   book does not look like an unread one.
+6. **The library can be put in order.** Recent, Title, Author or Longest.
+   Favourites float to the top in the default order, and not when an order
+   has been asked for.
+7. **Everything can be marked read at once** — and unmarked again.
+8. **The notes come out as Markdown.** File ▸ Export Notes…, grouped by the
+   document each note came from.
+9. **The Review module exists.** The sidebar had been holding a place for it
+   since the beginning. Spaced repetition over your own notes: the first line
+   is the prompt, the rest is the answer, and the schedule decides when it
+   comes back.
+10. **The suite watches the Mac helper.** It could wedge — the on-device
+    model is a single resource — and the user had to notice and restart by
+    hand. Now two failures in a row restart it.
+
+### The bug the watchdog found by accident
+
+The Review module's layout would not lay out. The heading was 828 points
+tall and the count label sat in the middle of the window, and no Auto Layout
+warning was printed.
+
+The cause was the trap this codebase already documents: **a view that keeps
+its autoresizing mask is never moved by its constraints.** The progress bar
+had lost its `translatesAutoresizingMaskIntoConstraints = false` when the
+view was rewritten, so it kept the 0×0 frame it was made with — and
+everything anchored to it landed in the wrong place. The fix was one line;
+finding it took a probe, because the symptom pointed at the whole view tree
+rather than at one small view.
+
+The lesson is in `NotesView.swift` already, in a comment above a helper
+called `handOverToAutoLayout`. It is worth reading before laying out a new
+view here.
+
 ## Phase 3 — the third ten: a learning desk, not a shell
 
 The brief was a redesign: functional buttons, a real library, and the old
@@ -362,11 +414,11 @@ Building the gate found four real defects that had been invisible:
   this Mac, and longer when the model is cold. The Mac provider works and the
   backend's 180-second budget covers it, but a briefing takes minutes rather
   than seconds. Ollama is the faster provider; the Mac one is the private one.
-- The **Mac helper can still wedge** after hours of use: `/mac/status` says
-  "available" while `/mac/chat` never returns. Killing the helper and letting
-  the suite start a fresh one fixes it. The suite should notice a silent
-  helper and restart it rather than leaving the user with a Mac provider that
-  never replies.
+- The **watchdog can only restart a helper it can find.** It looks for
+  whatever is holding port 8199 and checks that it really is `mac-service`
+  before stopping it, so a different program on that port is left alone — but
+  a helper that is wedged *and* has stopped listening altogether is only
+  noticed on the next poll.
 - The on-device model is slower than Ollama on a long chapter. The provider
   fallback chain handles it, but the Mac provider is best suited to short
   passages.
@@ -378,23 +430,33 @@ Building the gate found four real defects that had been invisible:
 
 ## Verified
 
-The gate (`./build.sh test`) is green at **35/35**, exit 0:
+The gate (`./build.sh test`) is green at **46/46**, exit 0:
 
 ```
 config.apps, config.services, stack.script, stack.ports.read,
 health.read, webview.attached, page.ready, webview.url, webview.title,
 bridge.status, library.documents, module.library, module.reader,
-module.notes, module.app, learning.note, learning.favourite,
+module.notes, module.review, module.app, learning.note, learning.favourite,
 learning.read, learning.cleanup, notes.button, notes.create, notes.list,
 notes.editor, notes.autosave, notes.survive, notes.cleanup, briefing.fetch,
 web.endpoint.read, provider.endpoint, mac.service, mac.chat, mac.speak,
-selftest.fixture, filepicker.fired, upload.pipeline
+selftest.fixture, filepicker.fired, upload.pipeline, reader.position,
+reader.persist, notes.chapter, notes.export, library.sort, library.bulk,
+review.schedule, review.lapse, review.cleanup
 ```
 
 The six `notes.*` checks are the end-to-end ones: the real **New Note**
 button, the real insertion path, and a wait for the note to appear **in the
 file on disk** — not just in the store in memory. They are the checks that
 found the auto-save that could never fire.
+
+The `review.*` and `reader.*` checks are the same kind of thing about the
+new work: two documents keeping two places, the place surviving the trip to
+the disk, a note keeping its chapter, the Markdown export containing the
+note and its chapter, the library putting itself in order, and the review
+schedule moving a note out of the way when it is remembered and bringing it
+back when it is forgotten. They use ids of their own and take their litter
+away again, so the user's own notes are never touched.
 
 The gate cleans up after itself: the document it uploads is deleted again
 before the run ends, so a gate that runs on every build does not leave a

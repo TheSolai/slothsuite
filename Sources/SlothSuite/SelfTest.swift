@@ -400,6 +400,117 @@ final class SelfTestRunner {
         check("notes.cleanup", leftovers.isEmpty, "\(leftovers.count) stray note(s)")
 
         controller.showModuleForTest("library")
+        checkLearningDesk()
+    }
+
+    // MARK: - The learning desk
+
+    /// The checks for the parts of the suite that make it a learning desk
+    /// rather than a reader: reading positions, sorting, bulk read state,
+    /// the review schedule and the notes export.
+    ///
+    /// These run against the real store, so they use ids of their own and
+    /// take their litter away again. The user's own notes, read state and
+    /// places are never touched.
+    private func checkLearningDesk() {
+        let learning = LearningStore.shared
+        let store = LibraryStore.shared
+
+        // 8. Every document keeps its own place, not just the last one.
+        let first = "selftest-document-a"
+        let second = "selftest-document-b"
+        learning.setPosition(documentId: first, chapter: 3, scroll: 0.42)
+        learning.setPosition(documentId: second, chapter: 7, scroll: 0.1)
+        let firstPosition = learning.position(for: first)
+        let secondPosition = learning.position(for: second)
+        let twoPlaces = firstPosition?.chapter == 3
+            && secondPosition?.chapter == 7
+            && abs((firstPosition?.scroll ?? 0) - 0.42) < 0.001
+        check("reader.position", twoPlaces, "two documents, two places")
+
+        // The place has to survive the trip to the disk.
+        learning.saveNow()
+        let onDisk = Self.positionsOnDisk()
+        check("reader.persist", onDisk[first]?.chapter == 3, "the place is on disk")
+
+        // 9. A note remembers the chapter it was taken from.
+        let note = learning.addNote(documentId: first,
+                                    documentTitle: "Self Test",
+                                    body: "a note\nwith a second line",
+                                    chapter: 3)
+        let keptChapter = learning.note(id: note.id)?.chapter == 3
+        check("notes.chapter", keptChapter, "the note kept its chapter")
+
+        // 10. The notes come out as Markdown, with the document and the
+        //     chapter they came from.
+        let markdown = Exporter.notesMarkdown([note])
+        let exportHas = markdown.contains("a note")
+            && markdown.contains("Chapter 3")
+            && markdown.contains("Self Test")
+        check("notes.export", exportHas, "the export has the note, its document and its chapter")
+
+        // 11. The library can be put in order.
+        let originalFilter = store.filter
+        let originalSort = store.sort
+        store.setFilter(.all)
+        store.setSort(.title)
+        let titles = store.filtered.map(\.title)
+        let inOrder = zip(titles, titles.dropFirst()).allSatisfy {
+            $0.localizedCaseInsensitiveCompare($1) != .orderedDescending
+        }
+        check("library.sort", !titles.isEmpty && inOrder, "\(titles.count) documents in title order")
+        store.setSort(originalSort)
+        store.setFilter(originalFilter)
+
+        // 12. Marking everything read at once — and unread again. This uses
+        //     an id of its own so the user's own read state is untouched.
+        let probe = "selftest-bulk-document"
+        learning.setRead(true, documentIds: [probe])
+        let marked = learning.isRead(documentId: probe)
+        learning.setRead(false, documentIds: [probe])
+        let unmarked = !learning.isRead(documentId: probe)
+        check("library.bulk", marked && unmarked, "marked a document read, and unread again")
+
+        // 13. The review schedule. A note nobody has reviewed is due; a note
+        //     that was remembered is not due until tomorrow; a note that was
+        //     forgotten comes back in ten minutes.
+        let dueBefore = learning.dueNotes().contains { $0.id == note.id }
+        learning.recordReview(noteId: note.id, remembered: true)
+        let dueAfter = learning.dueNotes().contains { $0.id == note.id }
+        let remembered = learning.reviewState(for: note.id)
+        check("review.schedule",
+              dueBefore && !dueAfter && remembered?.repetitions == 1,
+              "a note due now is not due after it is remembered")
+
+        learning.recordReview(noteId: note.id, remembered: false)
+        let lapsed = learning.reviewState(for: note.id)
+        let comesBackSoon = (lapsed?.dueAt ?? .distantFuture)
+            < Date().addingTimeInterval(LearningStore.lapseInterval + 60)
+        check("review.lapse",
+              lapsed?.repetitions == 0 && comesBackSoon,
+              "a forgotten note comes back in ten minutes")
+
+        // 14. And the test tidies up after itself.
+        learning.deleteNote(id: note.id)
+        // The note's place in the review schedule goes with it.
+        let orphaned = learning.reviewState(for: note.id)
+        check("review.cleanup", orphaned == nil, "the schedule entry went with the note")
+
+        learning.clearPosition(documentId: first)
+        learning.clearPosition(documentId: second)
+        learning.saveNow()
+        let strayNotes = learning.allNotes.filter { $0.body.contains("with a second line") }
+        check("learning.cleanup", strayNotes.isEmpty, "\(strayNotes.count) stray note(s)")
+    }
+
+    /// The reading positions as they are actually written on this machine.
+    private static func positionsOnDisk() -> [String: ReadingPosition] {
+        let url = PathTools.applicationSupportDirectory().appendingPathComponent("learning.json")
+        guard let data = try? Data(contentsOf: url),
+              let state = try? JSONDecoder().decode(LearningState.self, from: data) else {
+            return [:]
+        }
+        return state.positions
     }
 
     /// A completed document must produce a briefing the native reader can

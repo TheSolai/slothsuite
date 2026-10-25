@@ -196,6 +196,7 @@ Two features are built on it:
 | ⌘N | new note |
 | ⌘O | add a book |
 | ⌘E | export as separate files |
+| ⇧⌘E | export the notes as Markdown |
 | ⌘S | read the briefing aloud |
 | ⌘R | reload the page |
 | ⌘\\ | toggle the sidebar |
@@ -203,6 +204,8 @@ Two features are built on it:
 
 - **Drag and drop** a PDF or EPUB onto the window to import it straight away.
 - **Library filtering** and a per-document delete button in the sidebar.
+- **The library can be sorted** — recent, title, author or longest — and the
+  whole library can be marked read at once.
 - **The window remembers** which app you were using and reopens on it.
 - **The Dock badge** shows 🔊 while the Mac is speaking and 📋 when
   diagnostics are copied.
@@ -341,8 +344,62 @@ a search box that filters as you type.
   keystrokes and the disk.
 - The **row menu** (⋯) opens the document the note belongs to, or deletes the
   note.
+- A note made from the reader **remembers its chapter**, and opening it from
+  the note list goes straight to that chapter rather than to the top.
+- **File ▸ Export Notes…** (⇧⌘E) writes every note to a Markdown file,
+  grouped by the document it came from.
 - Notes live in `~/Library/Application Support/SlothSuite/learning.json`,
   next to the configuration, and nowhere else.
+
+## Reading position
+
+The reader remembers where you were, and puts you back there.
+
+- **Every document keeps its own place.** Reading a second book no longer
+  loses your place in the first.
+- The **chapter** is restored, and so is how far down it you had got — as a
+  fraction of the chapter, so it still lands in the right place when the
+  window is a different size.
+- The place is saved when you leave the reader, and on a quiet moment while
+  you scroll. It is written to disk but not announced, so the library and the
+  notes are not redrawn on every pixel.
+- The library card shows **"Ch 3 of 10"** for a document you have started, so
+  a half-read book does not look like an unread one.
+
+## Review
+
+The review desk is spaced repetition over your own notes. It was the one
+module the sidebar had been holding a place for.
+
+- Each note becomes a card. The **first line is the prompt** and the rest of
+  the note is the answer, which stays hidden until you ask to see it.
+- **Got it** moves the note further out — a day, then three, then a week,
+  then a fortnight, then a month. **Again** brings it back in ten minutes,
+  so it is still there before you close the app.
+- A note nobody has reviewed is due straight away.
+- The header says how many are due and how many are waiting for another day,
+  so an empty desk does not look like an empty brain.
+
+## The library, put in order
+
+- The **sort control** in the header: Recent, Title, Author or Longest.
+  Favourites float to the top in the default order, and not when an order
+  has been asked for.
+- **Mark all read** marks the whole library read — and, when everything is
+  read, offers to undo that.
+
+## The Mac services watchdog
+
+The helper can wedge. The on-device model is a single resource and the
+helper asks it one question at a time, so a request that was abandoned can
+leave it waiting for ever. After that `/mac/status` still says "available",
+but every model request queues behind the one that will never finish.
+
+The suite watches for it and puts it right by itself: the helper is asked
+whether it is there every 45 seconds, a model request that never comes back
+counts against it, and two failures in a row restart it. The port is checked
+before anything is stopped, so a different program that happened to be
+listening would be left alone.
 
 ## Self-test
 

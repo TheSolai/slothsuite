@@ -974,7 +974,11 @@ final class NoteRowView: NSTableCellView {
         previewLabel.stringValue = preview.isEmpty ? "Untitled note" : preview
         previewLabel.textColor = preview.isEmpty ? .tertiaryLabelColor : .labelColor
 
-        documentLabel.stringValue = note.documentTitle.isEmpty ? "No document" : note.documentTitle
+        // Where the note came from. A note taken in the reader remembers
+        // its chapter, so it can be found again in the book.
+        documentLabel.stringValue = note.documentTitle.isEmpty
+            ? note.chapterLabel
+            : "\(note.documentTitle) · \(note.chapterLabel)"
         dateLabel.stringValue = NotesView.relativeDate(note.updatedAt)
 
         updateSelectionAppearance()
