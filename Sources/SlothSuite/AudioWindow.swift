@@ -49,6 +49,13 @@ final class AudioWindowController {
     /// to speak.
     private var briefing: Briefing?
 
+    /// The pop-up that explains a term.
+    private let termPopUp = ReaderTermPopUpController()
+
+    /// The chips that carry a colour, so they can be repainted after a
+    /// light/dark switch.
+    private var termChips: [ReaderTermChipView] = []
+
     private init() {}
 
     // MARK: - Showing
@@ -84,7 +91,7 @@ final class AudioWindowController {
         // A real surface, so the headings and buttons have something to read
         // against. The surface repaints itself when the system appearance
         // changes.
-        let content = AudioContentView()
+        let content = AudioContentView(frame: NSRect(x: 0, y: 0, width: 760, height: 840))
         content.onAppearanceChange = { [weak self] in
             self?.refreshAppearance()
         }
@@ -181,6 +188,9 @@ final class AudioWindowController {
                               defer: false)
         window.title = "Audio and chapters"
         window.contentView = content
+        // Assigning a content view takes the window's size from the view's
+        // frame, so the size is set again afterwards to be sure of it.
+        window.setContentSize(NSSize(width: 760, height: 840))
         window.minSize = NSSize(width: 560, height: 480)
         window.center()
         self.window = window
@@ -208,6 +218,9 @@ final class AudioWindowController {
             chapterStack.addArrangedSubview(empty)
             return
         }
+
+        termChips = []
+        termPopUp.dismiss()
 
         var cards: [(card: NSView, number: NSTextField, playButton: NSButton)] = []
         for (index, chapter) in briefing.chapters.enumerated() {
@@ -246,6 +259,9 @@ final class AudioWindowController {
             entry.playButton.setColoredTitle("Play", color: Palette.accent,
                                              font: Typography.body(weight: .medium))
         }
+        for chip in termChips {
+            chip.needsDisplay = true
+        }
     }
 
     @discardableResult
@@ -268,11 +284,22 @@ final class AudioWindowController {
         number.layer?.backgroundColor = number.resolvedCGColor(Palette.wash(Palette.accent, amount: 0.16))
         number.translatesAutoresizingMaskIntoConstraints = false
 
-        let name = NSTextField(labelWithString: chapter.title)
+        // The chapter's name in full. A chapter called "The Labours of Men
+        // of Genius, However Erroneously Directed, Scare Us" is a name, and
+        // a reader who cannot see it cannot find the chapter again.
+        let name = NSTextField(wrappingLabelWithString: chapter.title.isEmpty
+                                ? "Chapter \(index + 1)"
+                                : chapter.title)
         name.font = Typography.title()
         name.lineBreakMode = .byTruncatingTail
+        name.maximumNumberOfLines = 3
+        name.cell?.truncatesLastVisibleLine = true
+        name.setContentCompressionResistancePriority(.required, for: .vertical)
 
-        let pages = NSTextField(labelWithString: chapter.pageRange)
+        var details: [String] = []
+        if !chapter.pageRange.isEmpty { details.append(chapter.pageRange) }
+        if chapter.wordCount > 0 { details.append("\(chapter.wordCount.formatted()) words") }
+        let pages = NSTextField(labelWithString: details.joined(separator: "  ·  "))
         pages.font = Typography.caption()
         pages.textColor = Palette.teal
 
@@ -288,6 +315,15 @@ final class AudioWindowController {
         playButton.imageHugsTitle = true
         playButton.tag = index
         playButton.setContentHuggingPriority(.required, for: .horizontal)
+
+        // The card's labels used to live in a stack, which took their
+        // autoresizing mask away for them. They are direct subviews now, so
+        // each one hands it over itself — a view that keeps the mask is
+        // never moved by its constraints, and nothing is logged when that
+        // happens.
+        name.translatesAutoresizingMaskIntoConstraints = false
+        pages.translatesAutoresizingMaskIntoConstraints = false
+        playButton.translatesAutoresizingMaskIntoConstraints = false
 
         // The spoken script, in full. This is the thing the window exists
         // for, so it is shown properly rather than truncated.
@@ -305,26 +341,59 @@ final class AudioWindowController {
         script.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         script.setContentHuggingPriority(.defaultLow, for: .horizontal)
 
-        let titleRow = NSStackView(views: [number, name, pages, playButton])
-        titleRow.orientation = .horizontal
-        titleRow.spacing = 10
-        titleRow.alignment = .centerY
-        titleRow.translatesAutoresizingMaskIntoConstraints = false
-        titleRow.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        name.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        // The chapter's key terms, as chips. One word each; the pop-up gives
+        // the rest of the meaning. A chapter list that only lists names
+        // makes the reader open every chapter to find out what is in it.
+        let chipsStack = NSStackView()
+        chipsStack.orientation = .horizontal
+        chipsStack.spacing = 6
+        chipsStack.alignment = .centerY
+        chipsStack.translatesAutoresizingMaskIntoConstraints = false
+        chipsStack.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
-        card.addSubview(titleRow)
+        for entry in chapter.keyTerms.prefix(4) {
+            let chip = ReaderTermChipView(term: entry.term, definition: entry.definition)
+            chip.onHover = { [weak self] view, rect in
+                self?.showTerm(view, rect)
+            }
+            chip.onLeave = { [weak self] in
+                self?.termPopUp.scheduleHide()
+            }
+            chipsStack.addArrangedSubview(chip)
+            termChips.append(chip)
+        }
+        chipsStack.isHidden = chipsStack.arrangedSubviews.isEmpty
+
+        card.addSubview(number)
+        card.addSubview(name)
+        card.addSubview(pages)
+        card.addSubview(playButton)
+        card.addSubview(chipsStack)
         card.addSubview(script)
 
-        titleRow.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 16).isActive = true
-        titleRow.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -16).isActive = true
-        titleRow.topAnchor.constraint(equalTo: card.topAnchor, constant: 14).isActive = true
+        number.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 16).isActive = true
+        number.topAnchor.constraint(equalTo: card.topAnchor, constant: 15).isActive = true
         number.widthAnchor.constraint(equalToConstant: 20).isActive = true
         number.heightAnchor.constraint(equalToConstant: 20).isActive = true
 
+        name.leadingAnchor.constraint(equalTo: number.trailingAnchor, constant: 10).isActive = true
+        name.topAnchor.constraint(equalTo: card.topAnchor, constant: 13).isActive = true
+        name.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -16).isActive = true
+
+        pages.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 16).isActive = true
+        pages.topAnchor.constraint(equalTo: name.bottomAnchor, constant: 6).isActive = true
+        pages.trailingAnchor.constraint(lessThanOrEqualTo: playButton.leadingAnchor, constant: -12).isActive = true
+
+        playButton.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -16).isActive = true
+        playButton.topAnchor.constraint(equalTo: name.bottomAnchor, constant: 2).isActive = true
+
+        chipsStack.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 16).isActive = true
+        chipsStack.topAnchor.constraint(equalTo: pages.bottomAnchor, constant: 10).isActive = true
+        chipsStack.trailingAnchor.constraint(lessThanOrEqualTo: card.trailingAnchor, constant: -16).isActive = true
+
         script.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 16).isActive = true
         script.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -16).isActive = true
-        script.topAnchor.constraint(equalTo: titleRow.bottomAnchor, constant: 10).isActive = true
+        script.topAnchor.constraint(equalTo: chipsStack.bottomAnchor, constant: 12).isActive = true
         script.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -16).isActive = true
 
         // The card is as wide as the page, so the script has a proper measure
@@ -332,6 +401,17 @@ final class AudioWindowController {
         card.widthAnchor.constraint(equalTo: chapterStack.widthAnchor).isActive = true
 
         return (card, number, playButton)
+    }
+
+    // MARK: - The term pop-up
+
+    /// Explain a term, in the pop-up above the chip it belongs to.
+    private func showTerm(_ chip: ReaderTermChipView, _ rect: NSRect) {
+        termPopUp.present(term: chip.term,
+                          definition: chip.definition,
+                          sections: [],
+                          relativeTo: rect,
+                          of: chip)
     }
 
     // MARK: - Playing

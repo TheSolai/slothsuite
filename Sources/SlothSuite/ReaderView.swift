@@ -43,6 +43,9 @@ final class ReaderView: NSView {
     private var listenButton: NSButton?
     private var playAllButton: NSButton?
 
+    /// The band's numbers and word cloud, at the top of the reader.
+    private let overviewView = ReaderOverviewView()
+
     private let chapterScroll = NSScrollView()
     private let chapterStack = NSStackView()
 
@@ -72,6 +75,13 @@ final class ReaderView: NSView {
 
     private var chapterPills: [ChapterPill] = []
 
+    /// The book's vocabulary, indexed so a term can be followed to every
+    /// chapter that uses it.
+    private var vocabulary = ReaderVocabulary()
+
+    /// The term pop-up: what a chip means, and where the reader can go next.
+    private let termPopUp = ReaderTermPopUpController()
+
     /// The chips of metadata under the title. Kept so their colours can be
     /// re-applied after a light/dark switch.
     private var chips: [ReaderChip] = []
@@ -92,6 +102,7 @@ final class ReaderView: NSView {
         authorLabel.translatesAutoresizingMaskIntoConstraints = false
         actionStack.translatesAutoresizingMaskIntoConstraints = false
         chipStack.translatesAutoresizingMaskIntoConstraints = false
+        overviewView.translatesAutoresizingMaskIntoConstraints = false
         loadingStack.translatesAutoresizingMaskIntoConstraints = false
         unavailableStack.translatesAutoresizingMaskIntoConstraints = false
 
@@ -103,6 +114,28 @@ final class ReaderView: NSView {
         buildBody()
         buildStates()
         layOutTheView()
+
+        // The chips and the keyword tags are the reader's way into the
+        // book. The text view knows where they are; these are what happen
+        // when the reader reaches for one.
+        textView.onChipHovered = { [weak self] chip, rect in
+            self?.showChip(chip, at: rect)
+        }
+        textView.onKeywordHovered = { [weak self] keyword, rect in
+            self?.showKeyword(keyword, at: rect)
+        }
+        textView.onKeywordClicked = { [weak self] keyword, rect in
+            self?.showKeyword(keyword, at: rect)
+        }
+        textView.onPointerLeft = { [weak self] in
+            self?.termPopUp.scheduleHide()
+        }
+
+        // A word in the cloud is a way into the book: it goes to the first
+        // chapter that uses the word and flashes it there.
+        overviewView.onWord = { [weak self] word in
+            self?.jump(to: word.chapter, flash: word.range)
+        }
 
         // The clip view is what actually moves when the reader scrolls; the
         // text view's own bounds never change, so this is the notification
@@ -189,6 +222,10 @@ final class ReaderView: NSView {
         chipStack.leadingAnchor.constraint(equalTo: headerView.leadingAnchor).isActive = true
         chipStack.topAnchor.constraint(equalTo: authorLabel.bottomAnchor, constant: 10).isActive = true
         chipStack.bottomAnchor.constraint(equalTo: headerView.bottomAnchor).isActive = true
+        // The row of chips is what tells the header how tall it is. Without
+        // this the header's height is ambiguous, and Auto Layout resolves an
+        // ambiguous height by stretching the header over the whole page.
+        chipStack.heightAnchor.constraint(equalToConstant: 19).isActive = true
         chipStackWidth = chipStack.widthAnchor.constraint(equalToConstant: 0)
         chipStackWidth?.isActive = true
     }
@@ -301,6 +338,7 @@ final class ReaderView: NSView {
 
     private func layOutTheView() {
         addSubview(headerView)
+        addSubview(overviewView)
         addSubview(chapterScroll)
         addSubview(bodyScroll)
         addSubview(overlay)
@@ -311,7 +349,11 @@ final class ReaderView: NSView {
 
         chapterScroll.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 28).isActive = true
         chapterScroll.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -28).isActive = true
-        chapterScroll.topAnchor.constraint(equalTo: headerView.bottomAnchor, constant: 14).isActive = true
+        overviewView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 28).isActive = true
+        overviewView.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -28).isActive = true
+        overviewView.topAnchor.constraint(equalTo: headerView.bottomAnchor, constant: 12).isActive = true
+
+        chapterScroll.topAnchor.constraint(equalTo: overviewView.bottomAnchor, constant: 12).isActive = true
         chapterBarHeight = chapterScroll.heightAnchor.constraint(equalToConstant: 26)
         chapterBarHeight?.isActive = true
 
@@ -344,16 +386,30 @@ final class ReaderView: NSView {
         rebuildChips(for: briefing)
         rebuildChapterBar(for: briefing.chapters)
 
+        termPopUp.dismiss()
+
         let built = BriefingTextBuilder.build(briefing)
         textView.textStorage?.setAttributedString(built.string)
         textView.ruleRange = built.thesisRange
         textView.ruleRanges = built.ruleRanges
         textView.cards = built.cards
+        // The chips and the keyword tags are the reader's way into the
+        // book, so the text view has to know where they are before it can
+        // say which one the pointer is over.
+        textView.chips = built.chips
+        textView.keywords = built.keywords
         // The panels and the rules are drawn by the text view itself, so a
         // change to the text only marks the text as dirty — they would
         // never be painted without this.
         textView.needsDisplay = true
         chapterRanges = built.chapterRanges
+
+        // The band and the pop-up share one index, so a word in the cloud
+        // leads to the same place a chip does.
+        vocabulary.build(chips: built.chips, keywords: built.keywords)
+        overviewView.show(briefing: briefing, vocabulary: vocabulary)
+        overviewView.isHidden = false
+        overviewView.setHeight(ReaderOverviewView.height)
 
         currentChapter = 0
         lastReportedChapter = 0
@@ -411,6 +467,9 @@ final class ReaderView: NSView {
 
     private func hideContent() {
         headerView.isHidden = true
+        overviewView.isHidden = true
+        overviewView.setHeight(0)
+        overviewView.clear()
         chapterScroll.isHidden = true
         bodyScroll.isHidden = true
         chapterBarHeight?.constant = 0
@@ -634,6 +693,175 @@ final class ReaderView: NSView {
         return true
     }
 
+    // MARK: - Following a term
+
+    /// Take the reader to a place in the book, and show them they got there.
+    ///
+    /// A jump that moves the page without saying so is a jump the reader has
+    /// to find their place in again, which is worse than not jumping at all.
+    /// The term is flashed, so the eye is sent to the right line.
+    private func jump(to chapter: Int, flash range: NSRange?) {
+        guard chapter > 0 else { return }
+
+        if let range, range.length > 0 {
+            scroll(to: range)
+        } else {
+            goToChapter(chapter)
+        }
+
+        if let range, range.length > 0 {
+            textView.flash(range)
+        }
+    }
+
+    /// Scroll so a range sits near the top of the column.
+    private func scroll(to range: NSRange) {
+        // The chapter a range belongs to is a fact about the book, not a
+        // guess about where the page is, so it is known even when the text
+        // has not been laid out and the scroll cannot be made yet.
+        let chapter = chapter(for: range.location)
+        currentChapter = chapter
+        lastReportedChapter = chapter
+        updatePillSelection()
+
+        guard let manager = textView.layoutManager, let container = textView.textContainer else { return }
+        manager.ensureLayout(for: container)
+
+        let glyphRange = manager.glyphRange(forCharacterRange: range, actualCharacterRange: nil)
+        let rect = manager.boundingRect(forGlyphRange: glyphRange, in: container)
+        guard rect.height > 0 else { return }
+
+        let target = rect.minY + textView.textContainerInset.height - Self.chapterHeadroom
+        bodyScroll.contentView.scroll(to: NSPoint(x: 0, y: target))
+
+        // The place is only reported once the reader is actually there.
+        onChapterChanged?(chapter)
+        schedulePositionReport()
+    }
+
+    /// The chapter a character belongs to.
+    private func chapter(for character: Int) -> Int {
+        var index = 0
+        for (offset, range) in chapterRanges.enumerated() where range.location <= character {
+            index = offset + 1
+        }
+        return index
+    }
+
+    /// The title of a chapter, for the pop-up to name.
+    private func chapterTitle(_ chapter: Int) -> String {
+        guard let briefing, chapter > 0, chapter <= briefing.chapters.count else {
+            return "Chapter \(chapter)"
+        }
+        let title = briefing.chapters[chapter - 1].title.trimmingCharacters(in: .whitespacesAndNewlines)
+        return title.isEmpty ? "Chapter \(chapter)" : title
+    }
+
+    /// Where a key term sits in a given chapter.
+    private func range(ofTerm name: String, inChapter chapter: Int) -> NSRange? {
+        let key = ReaderVocabulary.normalise(name)
+        return vocabulary.keyTerms.first {
+            $0.chapter == chapter && ReaderVocabulary.normalise($0.name) == key
+        }?.range
+    }
+
+    /// Where a keyword sits in a given chapter.
+    private func range(ofKeyword name: String, inChapter chapter: Int) -> NSRange? {
+        let key = ReaderVocabulary.normalise(name)
+        return vocabulary.keywords.first {
+            $0.chapter == chapter && ReaderVocabulary.normalise($0.name) == key
+        }?.range
+    }
+
+    // MARK: - The pop-up
+
+    /// Show what a key term means, and where the reader can go next.
+    private func showChip(_ chip: ReaderChipInfo, at rect: NSRect) {
+        var sections: [ReaderTermSection] = []
+
+        // The same term, in other chapters.
+        let elsewhere = vocabulary.chapters(forTerm: chip.term).filter { $0 != chip.chapter }
+        if !elsewhere.isEmpty {
+            let rows = elsewhere.map { chapter in
+                ReaderTermJump(title: chapterTitle(chapter),
+                               detail: "Chapter \(chapter)",
+                               action: { [weak self] in
+                                   guard let self else { return }
+                                   let range = self.range(ofTerm: chip.term, inChapter: chapter)
+                                   self.termPopUp.dismiss()
+                                   self.jump(to: chapter, flash: range)
+                               })
+            }
+            sections.append(ReaderTermSection(heading: "Also in", rows: rows))
+        }
+
+        // The terms whose definitions talk about this one.
+        let term = ReaderKeyTerm(name: chip.term,
+                                 word: chip.word,
+                                 definition: chip.definition,
+                                 chapter: chip.chapter,
+                                 range: chip.range)
+        let related = vocabulary.related(to: term)
+        if !related.isEmpty {
+            let rows = related.prefix(6).map { other in
+                ReaderTermJump(title: other.name,
+                               detail: "Chapter \(other.chapter)",
+                               action: { [weak self] in
+                                   guard let self else { return }
+                                   self.termPopUp.dismiss()
+                                   self.jump(to: other.chapter, flash: other.range)
+                               })
+            }
+            sections.append(ReaderTermSection(heading: "Related key terms", rows: Array(rows)))
+        }
+
+        termPopUp.present(term: chip.term,
+                          definition: chip.definition,
+                          sections: sections,
+                          relativeTo: rect,
+                          of: textView)
+    }
+
+    /// Show where a keyword is used, and the key terms that talk about it.
+    private func showKeyword(_ keyword: ReaderKeywordInfo, at rect: NSRect) {
+        var sections: [ReaderTermSection] = []
+
+        let chapters = vocabulary.chapters(forKeyword: keyword.keyword)
+        if !chapters.isEmpty {
+            let rows = chapters.map { chapter in
+                ReaderTermJump(title: chapterTitle(chapter),
+                               detail: "Chapter \(chapter)",
+                               action: { [weak self] in
+                                   guard let self else { return }
+                                   let range = self.range(ofKeyword: keyword.keyword, inChapter: chapter)
+                                   self.termPopUp.dismiss()
+                                   self.jump(to: chapter, flash: range)
+                               })
+            }
+            sections.append(ReaderTermSection(heading: "Appears in", rows: rows))
+        }
+
+        let terms = vocabulary.terms(mentioning: keyword.keyword)
+        if !terms.isEmpty {
+            let rows = terms.prefix(6).map { term in
+                ReaderTermJump(title: term.name,
+                               detail: "Chapter \(term.chapter)",
+                               action: { [weak self] in
+                                   guard let self else { return }
+                                   self.termPopUp.dismiss()
+                                   self.jump(to: term.chapter, flash: term.range)
+                               })
+            }
+            sections.append(ReaderTermSection(heading: "Key terms that mention it", rows: Array(rows)))
+        }
+
+        termPopUp.present(term: keyword.keyword,
+                          definition: "A keyword in \(chapterTitle(keyword.chapter)).",
+                          sections: sections,
+                          relativeTo: rect,
+                          of: textView)
+    }
+
     /// The vertical span of a chapter, in the scroll view's coordinates.
     ///
     /// A chapter ends where the next one begins — or at the end of the text,
@@ -750,6 +978,44 @@ final class ReaderView: NSView {
     /// The chapter the reader is looking at.
     var currentChapterIndex: Int { currentChapter }
 
+    /// The pop-up's own view, so it can be looked at without a pointer.
+    var termPopUpViewForInspection: NSView? { termPopUp.contentViewForInspection }
+
+    /// The chips and the keyword tags, for the self-test.
+    var readerTermsForTest: ([ReaderChipInfo], [ReaderKeywordInfo]) { (textView.chips, textView.keywords) }
+
+    /// The briefing on show, for the self-test.
+    var briefingForTest: Briefing? { briefing }
+
+    /// Follow a keyword, the way clicking its tag does.
+    ///
+    /// Returns the chapter the reader landed on, and whether the term was
+    /// flashed there. A keyword the reader cannot follow is a keyword that
+    /// is only a label.
+    func followKeywordForTest() -> (chapter: Int, flashed: Bool) {
+        let keyword = textView.keywords.first(where: { $0.chapter == currentChapter })
+            ?? textView.keywords.first
+        guard let keyword else { return (0, false) }
+
+        let chapters = vocabulary.chapters(forKeyword: keyword.keyword)
+        guard let first = chapters.first else { return (0, false) }
+
+        let range = self.range(ofKeyword: keyword.keyword, inChapter: first)
+        jump(to: first, flash: range)
+        return (currentChapter, textView.hasFlashForTest)
+    }
+
+    /// Open the pop-up for a term, for the snapshot harness.
+    ///
+    /// A pop-up only appears under a pointer, and a snapshot has no pointer,
+    /// so this opens the same pop-up the pointer would.
+    func showTermPopUpForTest() {
+        let chip = textView.chips.first(where: { $0.chapter == currentChapter })
+            ?? textView.chips.first
+        guard let chip else { return }
+        showChip(chip, at: textView.rect(for: chip.range))
+    }
+
     /// Which chapter is the reader looking at?
     private func chapterAtTopOfView() -> Int {
         guard !chapterRanges.isEmpty else { return 0 }
@@ -856,12 +1122,193 @@ private final class ReaderTextView: NSTextView {
     /// The tinted panels drawn behind the text.
     var cards: [ReaderCard] = []
 
+    /// The term chips, so the reader can be told which one they are over.
+    var chips: [ReaderChipInfo] = []
+
+    /// The keyword tags, which the reader can click.
+    var keywords: [ReaderKeywordInfo] = []
+
+    /// The pointer moved over a chip.
+    var onChipHovered: ((ReaderChipInfo, NSRect) -> Void)?
+    /// The pointer moved over a keyword tag.
+    var onKeywordHovered: ((ReaderKeywordInfo, NSRect) -> Void)?
+    /// The reader clicked a keyword tag.
+    var onKeywordClicked: ((ReaderKeywordInfo, NSRect) -> Void)?
+    /// The pointer left the text.
+    var onPointerLeft: (() -> Void)?
+
+    /// The chip the pointer is over, so the pop-up is not shown twice.
+    private var hoveredChip: ReaderChipInfo?
+    /// The keyword the pointer is over.
+    private var hoveredKeyword: ReaderKeywordInfo?
+
+    /// The range being flashed, and when the flash began.
+    private var flashRange: NSRange?
+    private var flashStarted: Date?
+    private var flashTimer: Timer?
+
     override func draw(_ dirtyRect: NSRect) {
         // The panels are drawn first so the text sits on top of them.
         drawCards(in: dirtyRect)
+        drawFlash(in: dirtyRect)
         super.draw(dirtyRect)
         drawRules(in: dirtyRect)
         drawRule(in: dirtyRect)
+    }
+
+    // MARK: The pointer
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        // The pop-up follows the pointer, so the window has to be told to
+        // report the mouse moving.
+        window?.acceptsMouseMovedEvents = true
+        updateTrackingAreas()
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        for area in trackingAreas { removeTrackingArea(area) }
+        addTrackingArea(NSTrackingArea(rect: bounds,
+                                       options: [.mouseMoved, .mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect],
+                                       owner: self,
+                                       userInfo: nil))
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        guard let index = characterIndex(at: point) else {
+            clearHover()
+            return
+        }
+
+        if let chip = chips.first(where: { NSLocationInRange(index, $0.range) }) {
+            if hoveredChip != chip {
+                hoveredChip = chip
+                onChipHovered?(chip, rect(for: chip.range))
+            }
+            NSCursor.pointingHand.set()
+            return
+        }
+
+        if let keyword = keywords.first(where: { NSLocationInRange(index, $0.range) }) {
+            if hoveredKeyword != keyword {
+                hoveredKeyword = keyword
+                onKeywordHovered?(keyword, rect(for: keyword.range))
+            }
+            NSCursor.pointingHand.set()
+            return
+        }
+
+        clearHover()
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        super.mouseExited(with: event)
+        clearHover()
+        onPointerLeft?()
+    }
+
+    /// A keyword tag is a link, so clicking it opens the pop-up rather than
+    /// moving the insertion point.
+    override func mouseUp(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        if let index = characterIndex(at: point),
+           let keyword = keywords.first(where: { NSLocationInRange(index, $0.range) }) {
+            onKeywordClicked?(keyword, rect(for: keyword.range))
+            return
+        }
+        super.mouseUp(with: event)
+    }
+
+    /// Nothing is under the pointer any more.
+    private func clearHover() {
+        if hoveredChip != nil || hoveredKeyword != nil {
+            hoveredChip = nil
+            hoveredKeyword = nil
+        }
+        NSCursor.arrow.set()
+    }
+
+    /// The character under a point in the text view.
+    private func characterIndex(at point: NSPoint) -> Int? {
+        guard let manager = layoutManager, let container = textContainer else { return nil }
+        guard container.size.width > 0 else { return nil }
+        manager.ensureLayout(for: container)
+
+        // The container sits inside the text view's inset, so the point has
+        // to be moved into the container's own coordinates.
+        let inset = textContainerInset
+        let converted = NSPoint(x: point.x - inset.width, y: point.y - inset.height)
+        let glyph = manager.glyphIndex(for: converted, in: container)
+        return manager.characterIndexForGlyph(at: glyph)
+    }
+
+    /// The rectangle a range occupies, in the text view's own coordinates.
+    func rect(for range: NSRange) -> NSRect {
+        guard let manager = layoutManager, let container = textContainer else { return .zero }
+        manager.ensureLayout(for: container)
+
+        let glyphRange = manager.glyphRange(forCharacterRange: range, actualCharacterRange: nil)
+        let bounds = manager.boundingRect(forGlyphRange: glyphRange, in: container)
+        return NSRect(x: bounds.minX + textContainerInset.width,
+                      y: bounds.minY + textContainerInset.height,
+                      width: bounds.width,
+                      height: bounds.height)
+    }
+
+    // MARK: The flash
+
+    /// Flash a range, so the reader can see where they landed.
+    func flash(_ range: NSRange) {
+        guard range.length > 0 else { return }
+
+        flashRange = range
+        flashStarted = Date()
+
+        flashTimer?.invalidate()
+        flashTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            if let started = self.flashStarted, Date().timeIntervalSince(started) > 1.5 {
+                self.flashRange = nil
+                self.flashStarted = nil
+                self.flashTimer?.invalidate()
+                self.flashTimer = nil
+            }
+            self.needsDisplay = true
+        }
+        needsDisplay = true
+    }
+
+    /// Is a term being flashed?
+    var hasFlashForTest: Bool { flashRange != nil }
+
+    /// Paint the flash behind the text.
+    ///
+    /// Gold, because the accent colour is what the panels and the chips are
+    /// drawn in, and a flash that looks like one of them is not noticed.
+    private func drawFlash(in dirtyRect: NSRect) {
+        guard let range = flashRange, range.length > 0, let started = flashStarted else { return }
+        guard let manager = layoutManager, let container = textContainer else { return }
+        manager.ensureLayout(for: container)
+
+        let elapsed = Date().timeIntervalSince(started)
+        let strength = max(0, 1 - elapsed / 1.5)
+        guard strength > 0 else { return }
+
+        let glyphRange = manager.glyphRange(forCharacterRange: range, actualCharacterRange: nil)
+        let bounds = manager.boundingRect(forGlyphRange: glyphRange, in: container)
+        guard bounds.height > 0 else { return }
+
+        let rect = NSRect(x: textContainerInset.width + bounds.minX - 4,
+                          y: textContainerInset.height + bounds.minY - 3,
+                          width: bounds.width + 8,
+                          height: bounds.height + 6)
+        guard rect.intersects(dirtyRect) else { return }
+
+        let path = NSBezierPath(roundedRect: rect, xRadius: 6, yRadius: 6)
+        resolvedColour(Palette.wash(Palette.gold, amount: 0.55 * strength)).setFill()
+        path.fill()
     }
 
     override func layout() {
@@ -1204,6 +1651,8 @@ private final class BriefingTextBuilder {
         let cards: [ReaderCard]
         /// The term chips.
         let chips: [ReaderChipInfo]
+        /// The keyword tags.
+        let keywords: [ReaderKeywordInfo]
         /// The ranges to rule underneath.
         let ruleRanges: [NSRange]
     }
@@ -1211,6 +1660,7 @@ private final class BriefingTextBuilder {
     private let text = NSMutableAttributedString()
     private var cards: [ReaderCard] = []
     private var chips: [ReaderChipInfo] = []
+    private var keywordInfos: [ReaderKeywordInfo] = []
     private var ruleRanges: [NSRange] = []
 
     // MARK: Type
@@ -1261,8 +1711,8 @@ private final class BriefingTextBuilder {
 
             builder.chapterTitle(chapter.title)
             builder.takeaways(chapter.takeaways)
-            builder.keyTerms(chapter.keyTerms)
-            builder.keywords(chapter.keywords)
+            builder.keyTerms(chapter.keyTerms, chapter: index + 1)
+            builder.keywords(chapter.keywords, chapter: index + 1)
             builder.glossary(chapter.glossary)
             builder.tips(chapter.tips)
             builder.hints(chapter.hints)
@@ -1274,6 +1724,7 @@ private final class BriefingTextBuilder {
                       thesisRange: thesisRange,
                       cards: builder.cards,
                       chips: builder.chips,
+                      keywords: builder.keywordInfos,
                       ruleRanges: builder.ruleRanges)
     }
 
@@ -1289,8 +1740,14 @@ private final class BriefingTextBuilder {
         append(title.uppercased(), font: Self.headingFont, colour: Palette.accent, style: Self.headingStyle())
     }
 
-    private func subheading(_ title: String) {
-        append(title.uppercased(), font: Self.subheadingFont, colour: Palette.teal, style: Self.subheadingStyle())
+    private func subheading(_ title: String, hint: String? = nil) {
+        append(title.uppercased(), font: Self.subheadingFont, colour: Palette.teal,
+               style: Self.subheadingStyle(), endsParagraph: false)
+        if let hint {
+            append("   \(hint)", font: Self.captionFont, colour: .tertiaryLabelColor,
+                   style: Self.subheadingStyle(), endsParagraph: false)
+        }
+        endParagraph(font: Self.subheadingFont, style: Self.subheadingStyle())
     }
 
     private func paragraph(_ body: String) {
@@ -1350,44 +1807,52 @@ private final class BriefingTextBuilder {
 
     /// The three key terms, as chips.
     ///
-    /// Hovering a chip shows what the term means, which is what the wrapped
-    /// app did with its glossary.
-    private func keyTerms(_ entries: [BriefingGlossary]) {
+    /// A chip is one word long. "Personal Day Card" is shown as "Personal",
+    /// and the pop-up gives the rest of the meaning — a chip long enough to
+    /// wrap takes the reader's eye off the page it is on.
+    private func keyTerms(_ entries: [BriefingGlossary], chapter: Int) {
         let usable = entries.filter { !$0.term.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
         guard !usable.isEmpty else { return }
 
-        subheading("Key terms")
+        subheading("Key terms", hint: "hover a chip for the full meaning")
         for (index, entry) in usable.prefix(3).enumerated() {
             if index > 0 {
                 append("   ", font: Self.chipFont, colour: .clear, style: Self.chipStyle(), endsParagraph: false)
             }
+            let word = ReaderChipWord.forTerm(entry.term)
             let start = text.length
-            append(" \(entry.term) ", font: Self.chipFont, colour: Palette.accent,
+            append(" \(word) ", font: Self.chipFont, colour: Palette.accent,
                    style: Self.chipStyle(), endsParagraph: false,
                    background: Palette.wash(Palette.accent, amount: 0.14))
             let range = NSRange(location: start, length: text.length - start)
             chips.append(ReaderChipInfo(term: entry.term,
+                                         word: word,
                                          definition: entry.definition,
-                                         range: range))
-            // The text system shows this when the reader hovers the chip.
-            text.addAttribute(.toolTip, value: entry.definition, range: range)
+                                         range: range,
+                                         chapter: chapter))
         }
         endParagraph(font: Self.chipFont, style: Self.chipStyle())
     }
 
     /// The short tags that say what the chapter covers.
-    private func keywords(_ tags: [String]) {
+    ///
+    /// A tag is a link: clicking it shows every chapter that uses the word,
+    /// and the key terms that talk about it.
+    private func keywords(_ tags: [String], chapter: Int) {
         let usable = tags.filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
         guard !usable.isEmpty else { return }
 
-        subheading("Keywords")
+        subheading("Keywords", hint: "click a tag to follow it")
         for (index, tag) in usable.prefix(6).enumerated() {
             if index > 0 {
                 append(" ", font: Self.tagFont, colour: .clear, style: Self.tagStyle(), endsParagraph: false)
             }
+            let start = text.length
             append("\(tag) ", font: Self.tagFont, colour: Palette.blue,
                    style: Self.tagStyle(), endsParagraph: false,
                    background: Palette.wash(Palette.blue, amount: 0.11))
+            let range = NSRange(location: start, length: text.length - start)
+            keywordInfos.append(ReaderKeywordInfo(keyword: tag, range: range, chapter: chapter))
         }
         endParagraph(font: Self.tagFont, style: Self.tagStyle())
     }

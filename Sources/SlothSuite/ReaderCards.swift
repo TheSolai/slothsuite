@@ -58,8 +58,26 @@ struct ReaderCard: Equatable {
 /// A term shown as a chip, with the definition that appears when it is
 /// hovered over.
 struct ReaderChipInfo: Equatable {
+    /// The full term, as the model wrote it.
     var term: String
+    /// The one word the chip actually shows.
+    ///
+    /// "Personal Day Card" is shown as "Personal", and the pop-up gives the
+    /// rest. A chip long enough to wrap takes the reader's eye off the page
+    /// it is on.
+    var word: String
     var definition: String
     /// The characters the chip occupies.
     var range: NSRange
+    /// The chapter it belongs to, 1-based.
+    var chapter: Int
+}
+
+/// A keyword tag, which the reader can click.
+struct ReaderKeywordInfo: Equatable {
+    var keyword: String
+    /// The characters the tag occupies.
+    var range: NSRange
+    /// The chapter it belongs to, 1-based.
+    var chapter: Int
 }

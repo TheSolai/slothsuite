@@ -366,6 +366,90 @@ the new brief is copied over the existing entry under the existing id,
 keeping the original date. A reader who had written a note against a book
 and stopped in chapter fourteen still has both.
 
+## Phase 9 — the reader you can follow
+
+*"Define the chapters names more, add in the key terms ect, make sure all
+buttons and back end is wired up, also the key terms should be one word, the
+a hover over pop up that give the rest of the meaning. Also the keywords
+should be clickable and linked to the other key words — add a word cloud and
+stats to this."*
+
+The terms in a book were labels. They were printed and could not be followed,
+so a reader who wanted to know where a word was used had to read every
+chapter to find out.
+
+### A chip is one word, and the pop-up has the rest
+
+"Personal Day Card" is a good name for a term and a bad shape for a chip: it
+wraps, it takes the reader's eye off the page it is on, and three of them in
+a row leave a ragged edge. The chip now carries the first word and the
+popover carries the rest — the whole term in a serif face, what it means, and
+the other chapters that use it.
+
+The popover is a real `NSPopover` rather than the `NSToolTip` attribute the
+reader used before. The attribute is documented for `NSTextView`, but it was
+never seen working, and a definition the reader cannot open is not a
+definition.
+
+### Keywords that lead to the other key words
+
+A keyword is now a link. Clicking one opens a pop-up with every chapter that
+uses the word and the key terms whose definitions talk about it, and every
+row in it is a jump: the reader goes to the chapter and the term is flashed
+in gold, so they can see where they landed instead of having to look for it.
+
+A jump that moves the page without saying so is worse than no jump at all.
+
+### The Overview band
+
+The numbers that describe a book were at the top of a long scroll, which
+means they are only there when the reader has just started. They are now in
+a band under the title, with the book's key terms, its keywords, its
+most-discussed term, and a word cloud of the words it keeps coming back to.
+Every word in the cloud is a way in.
+
+### Names, and what is not a chapter
+
+Front matter is the book's furniture. A copyright page is not a chapter, and
+when it was treated as one it got its own key terms, its own sixty-second
+recap, and a line in the chapter list that said "First available in this
+edition 2016". Copyright pages, title pages and tables of contents are now
+skipped when an EPUB is parsed.
+
+A chapter also has to be *named*. "Introduction", "Chapter 4" and "Part I"
+say where a chapter is rather than what is in it, so the model is asked for a
+name in the chapter's own vocabulary, and the book's own heading is used
+when it is better than the model's.
+
+Dropping the front matter moves every chapter after it up by one, so the
+place a reader had stopped reading is moved with it — matched by the
+chapter's title, not by its number.
+
+### Three layout bugs, all silent
+
+The band, the chips and the pop-up all went in at once, and the first
+snapshot showed a reader with no text in it and a header 850 points tall.
+
+- **The band kept its autoresizing mask.** Auto Layout ignores the
+  constraints of a view that still has one, so the band stayed at 0×0 and
+  everything that hung off it went with it. Nothing is logged when this
+  happens.
+- **The header's height became ambiguous.** It used to be known from the
+  row of chips under the title. Once the chapter bar hung off the band
+  instead, nothing pinned it, and Auto Layout resolves an ambiguous height
+  by stretching the view over the whole page.
+- **The chapters window had been broken all along.** Its labels were direct
+  subviews of the card but still had their autoresizing masks, so every
+  constraint was ignored and the whole window drew on top of itself. The
+  window was 264 points wide because assigning a content view with no frame
+  took the window's size from the view's — which was nothing.
+
+### How it is checked
+
+`reader.chips` checks that every chip is one word and still knows its term
+and definition. `reader.follows` clicks a keyword and checks that the reader
+landed on a chapter and flashed the term. Both are in the gate.
+
 ## Phase 7 — the fourth ten: a learning desk that remembers
 
 *"Now make 10 QoL improvements."* Every one of these was a gap found by

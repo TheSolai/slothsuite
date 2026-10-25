@@ -223,6 +223,7 @@ final class SelfTestRunner {
         checkReaderKeepsItsPlace()
         checkNotesModule()
         checkBriefing()
+        checkReaderTerms()
 
         // 9. The web-tools endpoints must exist. A 404 means the backend has
         //    no web access wired up; a 502 means it tried and the network
@@ -636,6 +637,55 @@ final class SelfTestRunner {
                   keys ? "this book was analysed before the fuller brief"
                        : "a chapter is missing part of its brief")
         }
+    }
+
+    /// The reader's terms.
+    ///
+    /// A chip is one word long and the term it stands for is kept whole, so
+    /// the pop-up can give the rest of the meaning. A keyword has to be
+    /// followable: clicking it takes the reader to a chapter that uses it
+    /// and flashes it there.
+    private func checkReaderTerms(attempt: Int = 0) {
+        let reader = controller.readerViewForTest
+        let (chips, keywords) = reader.readerTermsForTest
+
+        // The briefing arrives over the network, so a reader that has only
+        // just been shown has no chips yet. A check that passes on an empty
+        // reader checks nothing, so it waits for the briefing instead.
+        if chips.isEmpty && attempt < 8 {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+                self?.checkReaderTerms(attempt: attempt + 1)
+            }
+            return
+        }
+
+        guard !chips.isEmpty else {
+            // The reader really has no briefing — nothing to check.
+            let empty = reader.briefingForTest == nil
+            check("reader.chips", empty,
+                  empty ? "the reader has no briefing" : "the reader has a briefing but no chips")
+            check("reader.keywords", empty, "nothing to follow")
+            check("reader.follows", empty, "nothing to follow")
+            return
+        }
+
+        // Every chip is one word, and every chip still knows its term.
+        let oneWord = chips.allSatisfy { chip in
+            !chip.word.isEmpty
+                && chip.word.split(separator: " ").count == 1
+                && !chip.term.isEmpty
+                && !chip.definition.isEmpty
+        }
+        check("reader.chips", oneWord,
+              "\(chips.count) chips — \(chips[0].word) of \(chips[0].term)")
+
+        // The keyword tags have to be there to be followed.
+        check("reader.keywords", !keywords.isEmpty, "\(keywords.count) keyword tags")
+
+        // A keyword the reader cannot follow is only a label.
+        let (chapter, flashed) = reader.followKeywordForTest()
+        check("reader.follows", chapter > 0 && flashed,
+              "followed a keyword to chapter \(chapter)")
     }
 
     /// The Mac helper, the on-device model and the Mac voice.

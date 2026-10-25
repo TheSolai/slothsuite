@@ -407,6 +407,46 @@ and hand back "The second central idea" as a key term. Those are recognised
 and dropped, and the terms are made up from the glossary and the chapter's
 own vocabulary instead, so a chapter always shows real terms.
 
+## The reader's vocabulary
+
+A book's terms are the reader's way into it, so the reader treats them as
+links rather than as labels.
+
+- A **key term** is a chip of **one word**. "Personal Day Card" is shown as
+  "Personal", because a chip long enough to wrap takes the reader's eye off
+  the page it is on. Hovering the chip opens a pop-up with the whole term in a
+  serif face, what it means, and **the other chapters that use it** — click
+  one and the reader goes there and the term is flashed so they can see they
+  landed.
+- A **keyword tag** is clickable too. Clicking one opens a pop-up with every
+  chapter that uses the word and **the key terms whose definitions talk about
+  it**, so one word leads to the others.
+- **The Overview band** at the top of the reader carries the book's figures
+  — how many key terms it has, how many keywords, and its most-discussed
+  term — and a **word cloud** of the words it keeps coming back to. Every word
+  in the cloud is a way in: click one and the reader goes to the first
+  chapter that uses it.
+
+The pop-up is a real macOS popover, so it behaves the way a popover does:
+it sits above the chip, it is dismissed by clicking away, and it follows the
+light and dark appearance.
+
+The **Chapters** button opens a window with every chapter, its full name, its
+length, its key terms as chips, and its spoken script.
+
+### Names, and what is not a chapter
+
+A copyright page, a title page and a table of contents are the book's
+furniture, not its chapters. When one was treated as a chapter it got its own
+key terms, its own sixty-second recap, and a line in the chapter list called
+"First available in this edition 2016". Those pages are now skipped when a
+book is parsed.
+
+A chapter also has to be *named*. "Introduction", "Chapter 4" and "Part I"
+say where a chapter is, not what is in it, so the model is asked for a name
+that uses the chapter's own vocabulary, and the book's own heading is used
+when it is better. The chapters window shows those names in full.
+
 ## Review
 
 The review desk is spaced repetition over your own notes. It was the one

@@ -251,15 +251,33 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
         Log.shared.write("snapshot — switched to the dark appearance while running")
     }
 
+    /// The learning store as it was before a snapshot moved it.
+    ///
+    /// A snapshot is the reader's own data: opening a document moves the
+    /// "continue reading" pointer and writes a place. Looking at the
+    /// interface must not move the reader's place, so the store is taken as
+    /// it was and put back before the app exits.
+    private var snapshotSavedState: LearningState?
+
+    /// Put the reader's own data back after a snapshot.
+    private func restoreSnapshotState() {
+        guard let saved = snapshotSavedState else { return }
+        snapshotSavedState = nil
+        LearningStore.shared.restoreState(saved)
+    }
+
     private func runSnapshot() {
         guard let request = Self.snapshotRequest() else { return }
         Log.shared.write("snapshot requested for \(request.module)")
+
+        snapshotSavedState = LearningStore.shared.snapshotState()
 
         // A snapshot that never finishes must not leave the app running. A
         // stray copy of the suite holds the learning store open and uploads
         // its own fixture into the library.
         DispatchQueue.main.asyncAfter(deadline: .now() + 30.0) {
             Log.shared.write("snapshot failed — timed out after 30 seconds")
+            self.restoreSnapshotState()
             exit(1)
         }
 
@@ -292,6 +310,20 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
 
             self.showModule(request.module)
             Log.shared.write("snapshot module shown")
+
+            // The term pop-up only appears under a pointer, and a snapshot
+            // has no pointer, so it is opened on purpose and captured on its
+            // own.
+            if Self.snapshotAction() == "readerterm" {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2.2) {
+                    self.readerView.showTermPopUpForTest()
+                    Log.shared.write("snapshot action — opened the term pop-up")
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+                        self.captureWindow(to: request.path, in: .term)
+                    }
+                }
+                return
+            }
 
             // An action can be performed first, so the render shows the
             // result of an interaction rather than the idle state.
@@ -332,6 +364,7 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
     private enum SnapshotTarget {
         case main
         case audio
+        case term
     }
 
     private func openAudioWindowForInspection() {
@@ -344,12 +377,18 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
     }
 
     private func captureWindow(to path: String, in target: SnapshotTarget = .main) {
+        // The reader's own data goes back before anything leaves, so a
+        // snapshot cannot move the reader's place.
+        restoreSnapshotState()
+
         let view: NSView?
         switch target {
         case .main:
             view = window.contentView
         case .audio:
             view = AudioWindowController.shared.contentViewForInspection
+        case .term:
+            view = readerView.termPopUpViewForInspection
         }
         guard let view else {
             // A snapshot that cannot find its window must still stop. Leaving
@@ -2087,6 +2126,7 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
     var configForTest: SuiteConfig { config }
     var currentSpecForTest: AppSpec { current }
     var notesViewForTest: NotesView { notesView }
+    var readerViewForTest: ReaderView { readerView }
 
     func webViewForTest(_ id: String) -> WKWebView? { webViews[id] }
     func bridgeForTest(_ id: String) -> Bridge? { bridges[id] }
