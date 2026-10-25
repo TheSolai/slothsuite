@@ -45,15 +45,30 @@ final class SelfTestRunner {
     }
 
     private func finish() {
+        // The test reads books, writes places and makes notes, and all of
+        // that is the reader's own data. The whole store is put back here,
+        // so a test which was interrupted still leaves it alone.
+        if let saved = savedState {
+            LearningStore.shared.restoreState(saved)
+        }
         log.writeSync("SELFTEST end — \(checks - failures)/\(checks) checks passed")
         exit(failures == 0 ? 0 : 1)
     }
+
+    /// The store as it was before the test touched it.
+    private var savedState: LearningState?
 
     // MARK: - Run
 
     func begin() {
         log.mirrorToStderr(true)
         log.writeSync("SELFTEST begin")
+
+        // The store is the reader's own data — notes, places, favourites,
+        // read state and the "continue reading" pointer. The test is
+        // about the suite working, not about the reader's books, so the
+        // whole store is taken now and put back at the end.
+        savedState = LearningStore.shared.snapshotState()
 
         // 1. Configuration
         let config = controller.configForTest
@@ -205,6 +220,7 @@ final class SelfTestRunner {
         // 8. The native modules must switch cleanly, and the suite's own
         //    learning store must survive a round trip.
         checkLearningModules()
+        checkReaderKeepsItsPlace()
         checkNotesModule()
         checkBriefing()
 
@@ -284,6 +300,44 @@ final class SelfTestRunner {
 
         learning.deleteNote(id: note.id)
         check("learning.cleanup", learning.note(id: note.id) == nil, "note removed")
+    }
+
+    /// The reader must come back to the place it was given, and must not
+    /// report the top of the book as the reader's place while it does.
+    ///
+    /// Showing a document whose text has not been laid out yet used to
+    /// leave the reader at the top of the book and then report that top
+    /// as the place — overwriting the place that was saved. A book that
+    /// had been read for days lost its place the moment it was opened
+    /// again, and the library card went back to "Ch 1 of 39".
+    ///
+    /// Nothing is written here on purpose. The place is put where it was
+    /// before the test, and the reader is opened on top of it: if the
+    /// reader cannot get back to where it was left, the saved place is
+    /// gone and the check says so.
+    private func checkReaderKeepsItsPlace() {
+        let learning = LearningStore.shared
+        guard let id = learning.lastReadDocumentId,
+              LibraryStore.shared.document(id: id) != nil,
+              let saved = savedState?.positions[id],
+              saved.chapter > 0 else {
+            check("reader.keepsplace", true, "no place to check")
+            return
+        }
+
+        // Open the document again, the way opening it does.
+        controller.showModuleForTest("reader")
+
+        // The briefing has to arrive, the text has to be laid out, and the
+        // reader only reports its place once the scrolling has settled.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in
+            guard let self else { return }
+            let now = learning.position(for: id)
+            let kept = (now?.chapter ?? -1) == saved.chapter
+            self.check("reader.keepsplace",
+                       kept,
+                       "chapter \(now?.chapter ?? -1), was \(saved.chapter)")
+        }
     }
 
     /// The notes module must work the way the user works it: press "New
@@ -417,6 +471,14 @@ final class SelfTestRunner {
         let store = LibraryStore.shared
 
         // 8. Every document keeps its own place, not just the last one.
+        //
+        // Writing a place also moves the "continue reading" pointer, and
+        // that pointer is what the reader opens next. So it is remembered
+        // before the check and put back after it: a test run must not
+        // leave the reader pointing at a document that was never in the
+        // library.
+        let previousLastRead = learning.lastReadDocumentId
+        let previousLastReadChapter = learning.lastReadChapter
         let first = "selftest-document-a"
         let second = "selftest-document-b"
         learning.setPosition(documentId: first, chapter: 3, scroll: 0.42)
@@ -498,9 +560,13 @@ final class SelfTestRunner {
 
         learning.clearPosition(documentId: first)
         learning.clearPosition(documentId: second)
+        learning.restoreLastRead(documentId: previousLastRead, chapter: previousLastReadChapter)
         learning.saveNow()
         let strayNotes = learning.allNotes.filter { $0.body.contains("with a second line") }
         check("learning.cleanup", strayNotes.isEmpty, "\(strayNotes.count) stray note(s)")
+        check("learning.lastread",
+              learning.lastReadDocumentId == previousLastRead,
+              learning.lastReadDocumentId ?? "nothing")
     }
 
     /// The reading positions as they are actually written on this machine.

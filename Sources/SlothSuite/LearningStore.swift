@@ -322,7 +322,43 @@ final class LearningStore {
         commit()
     }
 
+    /// A copy of the whole store.
+    ///
+    /// The self-test reads books, writes places and makes notes. Anything
+    /// it leaves behind is litter in the reader's own data, so the store
+    /// is taken as it was before the test and put back afterwards.
+    func snapshotState() -> LearningState {
+        withState { $0 }
+    }
+
+    /// Put the whole store back, as it was.
+    func restoreState(_ saved: LearningState) {
+        mutate { state in
+            state = saved
+        }
+        commit()
+    }
+
+    /// Put the "continue reading" pointer back where it was.
+    ///
+    /// The pointer says which book the reader opens next, so it has to
+    /// be put back exactly as it was — including being put back to
+    /// *nothing*, which is what it is for a reader who has not opened a
+    /// book yet. The self-test writes to it while it checks that every
+    /// document keeps its own place, and without this a test run leaves
+    /// the reader pointing at a document that was never in the library.
+    func restoreLastRead(documentId: String?, chapter: Int) {
+        mutate { state in
+            state.lastReadDocumentId = documentId
+            state.lastReadChapter = chapter
+        }
+        commit()
+    }
+
     var lastReadDocumentId: String? { withState { $0.lastReadDocumentId } }
+
+    /// The chapter of the last-read document the reader was on.
+    var lastReadChapter: Int { withState { $0.lastReadChapter } }
 
     // MARK: Reading position
 

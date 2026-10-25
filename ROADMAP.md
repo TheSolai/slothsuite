@@ -332,6 +332,28 @@ card's rect is padded and the line fragment is not, so the two cannot be
 mixed: the badge's centre comes from the line fragment, and the card's
 rect only tells it where to sit across.
 
+### The reader lost the reader's place
+
+Two bugs, both found by looking at the reader's own data after a gate run
+rather than at the code.
+
+The self-test writes a reading position for two made-up documents while it
+checks that every document keeps its own place. Writing a place also moves
+the "continue reading" pointer, and the pointer is what the reader opens
+next — so after a gate run the reader opened a document that was never in
+the library. The test cleaned up its notes and its positions and forgot the
+pointer. It now takes the whole store at the start and puts it back at the
+end, so a test that was interrupted cannot leave litter in the reader's
+books either.
+
+And the reader itself lost the place. Coming back to a saved place needs
+the text view to have been laid out; when it had not, the move was silently
+not made, and the reader then reported the top of the book as the reader's
+place. A book that had been read for days went back to "Ch 1 of 39" the
+moment it was opened. The move is now checked rather than assumed — the
+scroll has to have landed — and a place that could not be applied is held
+until it can be, and is never reported as something else.
+
 ### Books have to be re-synthesised
 
 The new fields are produced when a book is analysed, so a book that was

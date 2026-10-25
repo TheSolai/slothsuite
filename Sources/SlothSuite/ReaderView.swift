@@ -368,8 +368,20 @@ final class ReaderView: NSView {
         overlay.isHidden = true
 
         // Put the reader back where they were.
+        //
+        // The restore needs the text view's layout, and a document that
+        // is opened before the window has settled has not got one yet.
+        // When that happens the place is held and applied as soon as the
+        // layout is there — otherwise the reader silently comes back to
+        // the top of the book, and reports the top as the reader's place,
+        // which overwrites the place that was saved.
+        pendingRestore = nil
+        positionWork?.cancel()
+        positionWork = nil
         if let position, position.chapter > 0 {
-            moveToChapter(position.chapter, fraction: position.scroll, report: false)
+            if !moveToChapter(position.chapter, fraction: position.scroll, report: false) {
+                pendingRestore = (position.chapter, position.scroll)
+            }
         }
     }
 
@@ -523,6 +535,22 @@ final class ReaderView: NSView {
     override func layout() {
         super.layout()
         layoutChapterRow()
+        applyPendingRestore()
+    }
+
+    /// Put the reader back to a place that could not be applied earlier.
+    ///
+    /// The text view is not laid out when a document is first shown, so
+    /// there is nowhere to scroll to yet. The place is kept until there
+    /// is.
+    private func applyPendingRestore() {
+        guard let pending = pendingRestore else { return }
+        guard moveToChapter(pending.chapter, fraction: pending.scroll, report: false) else {
+            return
+        }
+        pendingRestore = nil
+        // The reader is where it was asked to be now, so it can say so.
+        schedulePositionReport()
     }
 
     private static func shorten(_ text: String) -> String {
@@ -578,18 +606,32 @@ final class ReaderView: NSView {
     /// The fraction is what makes the reader come back to the same *line*,
     /// not just the same chapter. It is measured against the chapter's own
     /// height, so it survives a change of window size.
-    private func moveToChapter(_ index: Int, fraction: Double, report: Bool) {
-        guard index > 0, index - 1 < chapterRanges.count else { return }
-        guard let span = chapterSpan(index) else { return }
+    ///
+    /// Returns false when the move could not be made -- the text has not
+    /// been laid out yet, so there is nowhere to scroll to. The scroll
+    /// itself can be swallowed too: a scroll view with no height yet
+    /// cannot move, and the reader would then believe it was at the top
+    /// of the book. So the move is checked, not assumed.
+    @discardableResult
+    private func moveToChapter(_ index: Int, fraction: Double, report: Bool) -> Bool {
+        guard index > 0, index - 1 < chapterRanges.count else { return false }
+        guard let span = chapterSpan(index) else { return false }
 
         let clamped = min(max(fraction, 0), 1)
         let target = span.start + span.height * clamped - Self.chapterHeadroom
 
+        bodyScroll.contentView.scroll(to: NSPoint(x: 0, y: target))
+
+        // Did the scroll land? A scroll view that has not been given a
+        // height swallows the scroll and stays where it was.
+        let visible = bodyScroll.contentView.documentVisibleRect
+        guard abs(visible.minY - target) < 4 else { return false }
+
         currentChapter = index
         lastReportedChapter = index
         updatePillSelection()
-        bodyScroll.contentView.scroll(to: NSPoint(x: 0, y: target))
         if report { onChapterChanged?(index) }
+        return true
     }
 
     /// The vertical span of a chapter, in the scroll view's coordinates.
@@ -633,6 +675,15 @@ final class ReaderView: NSView {
         return min(max(offset / span.height, 0), 1)
     }
 
+    /// A place to put the reader back to, once the text has been laid out.
+    ///
+    /// The restore needs the text view's layout, and a document opened
+    /// before the window has settled does not have one yet. While this is
+    /// set the reader's place is not reported: what is on screen is the
+    /// top of the book, not where the reader was, and reporting it would
+    /// overwrite the place that was saved.
+    private var pendingRestore: (chapter: Int, scroll: Double)?
+
     /// The room left above a chapter heading when the reader jumps to it.
     ///
     /// A heading scrolled flush to the top of the text column has its
@@ -654,6 +705,9 @@ final class ReaderView: NSView {
             updatePillSelection()
             onChapterChanged?(index)
         }
+        // While the reader is on its way back to a saved place, where it
+        // is on screen is not where the reader was.
+        if pendingRestore != nil { return }
         schedulePositionReport()
     }
 
@@ -679,6 +733,8 @@ final class ReaderView: NSView {
     func flushPosition() {
         positionWork?.cancel()
         positionWork = nil
+        // A place that has not been applied yet is not the reader's place.
+        if pendingRestore != nil { return }
         onPositionChanged?(currentChapter, scrollFraction())
     }
 
