@@ -726,6 +726,15 @@ final class ReaderView: NSView {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.6, execute: work)
     }
 
+    /// Scroll the body down, for the snapshot harness.
+    ///
+    /// The reader is long, and a capture of the top of it says nothing
+    /// about the panels further down.
+    func scrollBodyForTest(by amount: CGFloat) {
+        let visible = bodyScroll.contentView.documentVisibleRect
+        bodyScroll.contentView.scroll(to: NSPoint(x: 0, y: visible.minY + amount))
+    }
+
     /// Report the position now, without waiting for the scrolling to settle.
     ///
     /// Called when the reader is put away, so the place is saved even if the

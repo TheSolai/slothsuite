@@ -316,6 +316,14 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
         case "newnote":
             notesView.pressNewNoteForTest()
             Log.shared.write("snapshot action — pressed New Note")
+        case "readerlower":
+            // The reader puts itself back where it was when the briefing
+            // arrives, which can be after this action runs. So the scroll
+            // is made once the reader has settled.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.6) { [weak self] in
+                self?.readerView.scrollBodyForTest(by: 760)
+                Log.shared.write("snapshot action — scrolled the reader down")
+            }
         default:
             Log.shared.write("snapshot action — unknown action \(action)")
         }
