@@ -22,6 +22,10 @@ struct ReaderCard: Equatable {
         case audio
         /// The whole-document overview.
         case overview
+        /// The book's central argument, on its own panel.
+        case thesis
+        /// One of the book's primary conclusions.
+        case conclusion
 
         /// The colour of the card's hairline.
         var accent: NSColor {
@@ -31,6 +35,8 @@ struct ReaderCard: Equatable {
             case .hints: return Palette.gold
             case .audio: return Palette.teal
             case .overview: return Palette.blue
+            case .thesis: return Palette.teal
+            case .conclusion: return Palette.blue
             }
         }
 
@@ -45,6 +51,8 @@ struct ReaderCard: Equatable {
             case .hints: return 0.08
             case .audio: return 0.07
             case .overview: return 0.06
+            case .thesis: return 0.07
+            case .conclusion: return 0.05
             }
         }
     }
@@ -54,6 +62,34 @@ struct ReaderCard: Equatable {
     var range: NSRange
     /// The number in the badge at the start of the card, if it has one.
     var badge: Int?
+}
+
+// MARK: - The briefing numbers
+
+/// One of the three numbers on the executive briefing.
+///
+/// The deck put these side by side: what the distillation saved you, what
+/// the book would have taken, and how much was kept.
+struct ReaderStat: Equatable {
+    /// What the number is: "Time Saved".
+    var label: String
+    /// The number itself: "~45 min".
+    var value: String
+    /// A second line under the value, for the card whose value is two words.
+    var detail: String?
+    /// The colour of the card's hairline, and of its label.
+    var accent: NSColor
+}
+
+/// The three numbers on the executive briefing, side by side.
+///
+/// They are painted rather than set in the text. Three cards in a row have
+/// to share the width of the column, and the column is a different width in
+/// every window — text laid out in a fixed position cannot follow it.
+struct ReaderStatRow: Equatable {
+    var stats: [ReaderStat]
+    /// The band of the page the row is painted in.
+    var range: NSRange
 }
 
 // MARK: - Chips

@@ -220,7 +220,6 @@ final class SelfTestRunner {
         // 8. The native modules must switch cleanly, and the suite's own
         //    learning store must survive a round trip.
         checkLearningModules()
-        checkReaderKeepsItsPlace()
         checkNotesModule()
         checkBriefing()
         checkReaderTerms()
@@ -313,32 +312,92 @@ final class SelfTestRunner {
     /// had been read for days lost its place the moment it was opened
     /// again, and the library card went back to "Ch 1 of 39".
     ///
-    /// Nothing is written here on purpose. The place is put where it was
-    /// before the test, and the reader is opened on top of it: if the
-    /// reader cannot get back to where it was left, the saved place is
-    /// gone and the check says so.
-    private func checkReaderKeepsItsPlace() {
+    /// "Send to Notes" must turn a book's briefing into a note and open it.
+    ///
+    /// The note is the reader's own writing, so the check takes its litter
+    /// away again: the note it makes is removed as soon as it has been
+    /// looked at.
+    private func checkSendToNotes(attempt: Int = 0, then: @escaping () -> Void) {
         let learning = LearningStore.shared
-        guard let id = learning.lastReadDocumentId,
-              LibraryStore.shared.document(id: id) != nil,
-              let saved = savedState?.positions[id],
-              saved.chapter > 0 else {
-            check("reader.keepsplace", true, "no place to check")
+        let before = Set(learning.allNotes.map(\.id))
+
+        guard let document = LibraryStore.shared.documents.first else {
+            check("notes.send", true, "no document to send")
+            then()
             return
         }
 
-        // Open the document again, the way opening it does.
-        controller.showModuleForTest("reader")
+        controller.sendToNotesForTest(document)
 
-        // The briefing has to arrive, the text has to be laid out, and the
-        // reader only reports its place once the scrolling has settled.
+        // The briefing comes over the network, so the note is not there the
+        // instant the menu item is pressed.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+            guard let self else { return }
+            let made = learning.allNotes.first { !before.contains($0.id) && $0.documentId == document.id }
+
+            guard let note = made else {
+                if attempt < 8 {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+                        self?.checkSendToNotes(attempt: attempt + 1, then: then)
+                    }
+                    return
+                }
+                self.check("notes.send", false, "no note was made")
+                then()
+                return
+            }
+
+            let hasArgument = note.body.contains("CENTRAL ARGUMENT")
+            let hasConclusions = note.body.contains("PRIMARY CONCLUSIONS")
+            let hasText = note.body.count > 120
+            self.check("notes.send", hasArgument && hasConclusions && hasText,
+                       hasArgument && hasConclusions && hasText
+                           ? "the briefing became a note"
+                           : "the note is missing its headings")
+
+            // The note is the reader's own writing; the check takes it away.
+            learning.deleteNote(id: note.id)
+            then()
+        }
+    }
+
+    /// The last check: a book opens on its briefing.
+    ///
+    /// Every book opens at the front of the book — the executive briefing,
+    /// in the deck's shape — and opening one must not throw away the place
+    /// the reader had left. The briefing is the front of the book, not a
+    /// place in it, so it is not written over the saved place.
+    ///
+    /// This runs last, and on its own: it moves the reader, and nothing
+    /// else may move the reader while the check is watching it.
+    private func checkReaderOpensOnItsBriefing() {
+        let learning = LearningStore.shared
+        guard let id = learning.lastReadDocumentId,
+              LibraryStore.shared.document(id: id) != nil,
+              let before = learning.position(for: id) else {
+            check("reader.opening", true, "no place to check")
+            check("reader.keepsplace", true, "no place to check")
+            finish()
+            return
+        }
+
+        // Open the book, the way opening it does.
+        controller.openDocumentForTest(id: id, opening: .briefing)
+
+        // The briefing has to arrive and the text has to be laid out.
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in
             guard let self else { return }
+            let reader = self.controller.readerViewForTest
+            let front = reader.isAtTheFrontForTest
+            self.check("reader.opening", front,
+                       front ? "the book opened on its briefing" : "the book opened somewhere else")
+
+            // And the place the reader had is still there.
             let now = learning.position(for: id)
-            let kept = (now?.chapter ?? -1) == saved.chapter
-            self.check("reader.keepsplace",
-                       kept,
-                       "chapter \(now?.chapter ?? -1), was \(saved.chapter)")
+            let kept = (now?.chapter ?? -1) == before.chapter
+            self.check("reader.keepsplace", kept,
+                       "chapter \(now?.chapter ?? -1), was \(before.chapter)")
+            self.finish()
         }
     }
 
@@ -710,7 +769,9 @@ final class SelfTestRunner {
             }
             check("reader.pillars", true, "the reader has no briefing")
             check("reader.width", true, "the reader has no briefing")
+            check("reader.briefing", true, "the reader has no briefing")
             check("reader.popout", true, "the reader has no briefing")
+            self.checkLibraryMenu()
             return
         }
 
@@ -730,6 +791,20 @@ final class SelfTestRunner {
         check("reader.width", widths.column > 0 && share > 0.55,
               "column \(Int(widths.column)) of \(Int(widths.area)) — \(Int(share * 100))%")
 
+        // The briefing page itself, in the deck's shape: the page every
+        // book opens on.
+        let page = reader.briefingTextForTest.lowercased()
+        let wanted = ["executive briefing & thesis",
+                      "central argument",
+                      "time saved",
+                      "original reading time",
+                      "distillation ratio",
+                      "primary strategic conclusions"]
+        let missing = wanted.filter { !page.contains($0) }
+        check("reader.briefing", missing.isEmpty,
+              missing.isEmpty ? "the executive briefing is there"
+                              : "missing: \(missing.joined(separator: ", "))")
+
         // The reader can be popped out into a window of its own.
         controller.togglePopOutForTest()
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
@@ -739,6 +814,44 @@ final class SelfTestRunner {
                        open ? "the reader opened in its own window" : "the reader did not open")
             // Put it away again, so the check leaves nothing on screen.
             if open { self.controller.togglePopOutForTest() }
+            // The library comes last: switching to it would take the reader
+            // off the screen, and the checks above need it there.
+            self.checkLibraryMenu()
+        }
+    }
+
+    /// The card's "…" button and a right-click on the card must both open
+    /// the same, useful menu.
+    ///
+    /// The button used to open an empty menu — the closure built a menu of
+    /// its own and threw it away — and a right-click did nothing at all, so
+    /// both paths are driven here rather than one of them.
+    private func checkLibraryMenu(attempt: Int = 0) {
+        controller.showModuleForTest("library")
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
+            guard let self else { return }
+            let menus = self.controller.libraryViewForTest.cardMenusForTest()
+
+            // The cards have to have been laid out for the right-click to
+            // land on one.
+            if menus.rightClick.isEmpty && attempt < 6 {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+                    self?.checkLibraryMenu(attempt: attempt + 1)
+                }
+                return
+            }
+
+            let wanted = ["Open", "Send to Notes\u{2026}", "Add a note\u{2026}",
+                          "Speak the summary\u{2026}", "Export as separate files\u{2026}"]
+            let absent = wanted.filter { !menus.button.contains($0) }
+            self.check("library.menu", absent.isEmpty,
+                       absent.isEmpty ? "\(menus.button.count) items on the card"
+                                      : "missing: \(absent.joined(separator: ", "))")
+
+            self.check("library.rightclick", menus.rightClick == menus.button,
+                       menus.rightClick.isEmpty ? "the right-click opened nothing"
+                                                : "\(menus.rightClick.count) items on the right-click")
         }
     }
 
@@ -855,7 +968,9 @@ final class SelfTestRunner {
                 self.check("upload.pipeline", moving || deck, "stage: \(stage)")
                 self.log.write("SELFTEST INFO deck-visible=\(deck)")
                 self.removeUploadedDocuments()
-                self.finish()
+                self.checkSendToNotes { [self] in
+                    self.checkReaderOpensOnItsBriefing()
+                }
             }
         }
     }

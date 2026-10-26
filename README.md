@@ -351,12 +351,37 @@ a search box that filters as you type.
 - Notes live in `~/Library/Application Support/SlothSuite/learning.json`,
   next to the configuration, and nowhere else.
 
+## Every book opens on its briefing
+
+A book opens on the **Executive Briefing & Thesis** — the page the wrapped
+deck showed as its first slide, in the deck's own shape:
+
+- the strip that says *Executive Synthesis & Global Thesis · Full Manuscript
+  Distillation*, with a hairline under it;
+- the page title, **Executive Briefing & Thesis**;
+- the **Central Argument** — the book's thesis as a pull quote on a teal panel,
+  with a rule down its margin;
+- the three numbers side by side — **Time Saved**, **Original Reading Time**
+  and **Distillation Ratio** — each in the deck's own colour;
+- the **Primary Strategic Conclusions**, one to a numbered row.
+
+Those three numbers are painted rather than set in the text, because three
+cards in a row have to share the width of the column and the column is a
+different width in every window. The text leaves a band for them and the
+painter fills it. The words are in the text in a colour nobody can see, so
+⌘F still finds "335 min" and ⌘A still copies it.
+
 ## Reading position
 
-The reader remembers where you were, and puts you back there.
+The reader remembers where you were, and offers it back.
 
 - **Every document keeps its own place.** Reading a second book no longer
   loses your place in the first.
+- A book opens on its briefing, and the header carries a **Continue at
+  Chapter 12** chip when there is a place to go back to. The place is offered,
+  not imposed.
+- The briefing is the front of the book, not a place in it, so opening a book
+  never writes over the chapter you were in.
 - The **chapter** is restored, and so is how far down it you had got — as a
   fraction of the chapter, so it still lands in the right place when the
   window is a different size.
@@ -365,6 +390,24 @@ The reader remembers where you were, and puts you back there.
   notes are not redrawn on every pixel.
 - The library card shows **"Ch 3 of 10"** for a document you have started, so
   a half-read book does not look like an unread one.
+- The library's **Continue reading** button is the one thing that takes you
+  straight back to where you were, because that is what its name says.
+
+## The book's menu
+
+Every card in the library has a **⋯** button, and a right-click on the card
+opens the same menu:
+
+- **Open** ⌘O
+- **Send to Notes…** ⇧⌘N — the book's briefing becomes a note: the central
+  argument, the executive summary, the primary conclusions and the key points,
+  as plain text you can edit, and the note opens in the Notes module
+- **Add a note…** — an empty note on the book
+- **Speak the summary…** ⌘S
+- **Export as separate files…** ⌘E
+- **Favourite** ⌘D and **Mark as read** ⌘R, which say which way round they
+  are for the book you are looking at
+- **Remove from library** ⌘⌫
 
 ## The reader, laid out like the deck it replaced
 
@@ -534,8 +577,12 @@ endpoints, the file picker, and finally that an upload actually reaches
 the briefing deck. It exits non-zero if anything fails, so it works as a
 build gate.
 
-The notes module has its own end-to-end check, because the store can be
-perfectly healthy while the module is broken. It presses the real **New Note**
+The reader's own behaviour is checked too: that a book opens on its
+briefing, that the briefing is there in the deck's shape, that the card's
+menu and a right-click on the card offer the same list, and that "Send to
+Notes" really does make a note out of a briefing. The notes module has its
+own end-to-end check, because the store can be perfectly healthy while the
+module is broken. It presses the real **New Note**
 button, types through the editor's own insertion path, waits for the
 auto-save to land **on the disk**, and confirms the note is still there after
 a trip through another module. It cleans up after itself.

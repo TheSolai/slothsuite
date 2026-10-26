@@ -133,6 +133,12 @@ final class BriefingStore {
 
     private(set) var briefings: [String: Briefing] = [:]
     private var inFlight: Set<String> = []
+    /// The callers waiting on a load that is already running.
+    ///
+    /// A second caller for a document that is already being fetched still
+    /// wants an answer. Without this the second caller is left waiting for
+    /// something that never arrives — the menu item appears to do nothing.
+    private var waiting: [String: [(Briefing?) -> Void]] = [:]
 
     /// Fired when a briefing finishes loading.
     var onChange: (() -> Void)?
@@ -146,9 +152,15 @@ final class BriefingStore {
 
     /// Load a briefing. Safe to call repeatedly for the same document.
     func load(documentId: String, spec: AppSpec?, completion: ((Briefing?) -> Void)? = nil) {
-        guard !inFlight.contains(documentId) else { return }
         guard let base = spec?.apiBase else {
             completion?(nil)
+            return
+        }
+
+        if inFlight.contains(documentId) {
+            if let completion {
+                waiting[documentId, default: []].append(completion)
+            }
             return
         }
 
@@ -178,6 +190,8 @@ final class BriefingStore {
 
                 self.briefings[documentId] = briefing
                 self.onChange?()
+                let waiters = self.waiting.removeValue(forKey: documentId) ?? []
+                for waiter in waiters { waiter(briefing) }
                 completion?(briefing)
             }
         }.resume()

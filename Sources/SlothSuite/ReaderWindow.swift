@@ -70,12 +70,12 @@ final class ReaderWindowController: NSObject, NSWindowDelegate {
 
     /// Open the window for a briefing, or bring it forward if it is already
     /// open.
-    func show(briefing: Briefing, position: ReadingPosition?) {
+    func show(briefing: Briefing, opening: ReaderOpening, saved: ReadingPosition?) {
         if window == nil {
             buildWindow()
         }
 
-        readerView.show(briefing: briefing, restoring: position)
+        readerView.show(briefing: briefing, opening: opening, saved: saved)
         window?.title = briefing.title
         window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)

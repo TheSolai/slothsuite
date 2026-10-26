@@ -1,5 +1,20 @@
 import Cocoa
 
+// MARK: - Opening
+
+/// Where a book opens.
+///
+/// A book opens on its executive briefing: the page that says what the book
+/// is about, in the deck's shape. A reader who asks for a chapter — a note
+/// links to one, the library's "continue reading" button — is taken there
+/// instead.
+enum ReaderOpening {
+    /// The front of the book.
+    case briefing
+    /// A chapter, and how far down it.
+    case chapter(Int, Double)
+}
+
 // MARK: - The reader
 
 /// The native reader for a document's briefing.
@@ -34,6 +49,12 @@ final class ReaderView: NSView {
 
     /// The pending position report, if a newer one has replaced it.
     private var positionWork: DispatchWorkItem?
+
+    /// Where the reader had got to last time, if anywhere.
+    ///
+    /// The place is offered, not imposed: a book opens on its briefing, and
+    /// the header carries a way back to where the reader was.
+    private var savedPosition: ReadingPosition?
 
     // MARK: Subviews
 
@@ -400,18 +421,25 @@ final class ReaderView: NSView {
 
     /// Render a briefing.
     ///
-    /// `position` is where the reader had got to last time. Passing it puts
-    /// them back there instead of at the top, which is the whole point of
-    /// remembering a place.
-    func show(briefing: Briefing, restoring position: ReadingPosition? = nil) {
+    /// A book opens on its executive briefing — the page that says what the
+    /// book is about, in the deck's shape. A reader who asks for a chapter is
+    /// taken there instead.
+    ///
+    /// `saved` is where the reader got to last time. It is not taken
+    /// automatically, because the briefing is the front of the book, but it is
+    /// offered in the header: the place is never lost, it is only not imposed.
+    func show(briefing: Briefing,
+              opening: ReaderOpening = .briefing,
+              saved: ReadingPosition? = nil) {
         self.briefing = briefing
+        self.savedPosition = saved
 
         titleLabel.stringValue = briefing.title
         let author = briefing.author.isEmpty ? briefing.filename : briefing.author
         authorLabel.stringValue = author
         authorHeight?.constant = author.isEmpty ? 0 : 16
 
-        rebuildChips(for: briefing)
+        rebuildChips(for: briefing, saved: saved)
         rebuildChapterBar(for: briefing.chapters)
 
         termPopUp.dismiss()
@@ -421,6 +449,8 @@ final class ReaderView: NSView {
         textView.ruleRange = built.thesisRange
         textView.ruleRanges = built.ruleRanges
         textView.cards = built.cards
+        // The three numbers are painted into a band the text leaves for them.
+        textView.statRow = built.statRow
         // The chips and the keyword tags are the reader's way into the
         // book, so the text view has to know where they are before it can
         // say which one the pointer is over.
@@ -459,21 +489,35 @@ final class ReaderView: NSView {
         bodyScroll.isHidden = false
         overlay.isHidden = true
 
-        // Put the reader back where they were.
+        // Open the book where it was asked to open.
         //
-        // The restore needs the text view's layout, and a document that
-        // is opened before the window has settled has not got one yet.
-        // When that happens the place is held and applied as soon as the
-        // layout is there — otherwise the reader silently comes back to
-        // the top of the book, and reports the top as the reader's place,
-        // which overwrites the place that was saved.
+        // The move needs the text view's layout, and a document that is
+        // opened before the window has settled has not got one yet. When that
+        // happens the place is held and applied as soon as the layout is
+        // there — otherwise the reader silently comes back to the top of the
+        // book, and reports the top as the reader's place, which overwrites
+        // the place that was saved.
         pendingRestore = nil
         positionWork?.cancel()
         positionWork = nil
-        if let position, position.chapter > 0 {
-            if !moveToChapter(position.chapter, fraction: position.scroll, report: false) {
-                pendingRestore = (position.chapter, position.scroll)
+        switch opening {
+        case .briefing:
+            bodyScroll.contentView.scroll(to: .zero)
+        case .chapter(let index, let fraction):
+            if !moveToChapter(index, fraction: fraction, report: false) {
+                pendingRestore = (index, fraction)
             }
+        }
+    }
+
+    /// Go back to the place the reader left.
+    ///
+    /// The place is kept, not thrown away: a book opens on its briefing, but
+    /// the header always carries a way back to where the reader was.
+    private func resume(_ position: ReadingPosition) {
+        guard position.chapter > 0 else { return }
+        if !moveToChapter(position.chapter, fraction: position.scroll, report: true) {
+            pendingRestore = (position.chapter, position.scroll)
         }
     }
 
@@ -539,7 +583,7 @@ final class ReaderView: NSView {
 
     // MARK: Chips
 
-    private func rebuildChips(for briefing: Briefing) {
+    private func rebuildChips(for briefing: Briefing, saved: ReadingPosition? = nil) {
         for view in chipStack.arrangedSubviews {
             chipStack.removeArrangedSubview(view)
             view.removeFromSuperview()
@@ -557,6 +601,14 @@ final class ReaderView: NSView {
         if briefing.standardReadingMinutes > 0 {
             chips.append(ReaderChip(text: "\(Self.readingTime(briefing.standardReadingMinutes)) read",
                                     colour: Palette.accent))
+        }
+        // Where the reader got to last time, if they got somewhere. The book
+        // still opens on its briefing; this is the way back.
+        if let saved, saved.chapter > 0 {
+            let chip = ReaderChip(text: "\u{21BB} Continue at Chapter \(saved.chapter)",
+                                  colour: Palette.rose)
+            chip.onClick = { [weak self] in self?.resume(saved) }
+            chips.append(chip)
         }
 
         for chip in chips {
@@ -1001,7 +1053,7 @@ final class ReaderView: NSView {
     }
 
     /// How far down the current chapter the reader is, from 0 to 1.
-    private func scrollFraction() -> Double {
+    func scrollFraction() -> Double {
         guard let span = chapterSpan(currentChapter) else { return 0 }
         let visible = bodyScroll.contentView.documentVisibleRect
         let offset = visible.minY - span.start
@@ -1155,6 +1207,12 @@ final class ReaderView: NSView {
     /// The briefing on show, for the self-test.
     var briefingForTest: Briefing? { briefing }
 
+    /// The text the reader is showing, for the self-test.
+    var briefingTextForTest: String { textView.textStorage?.string ?? "" }
+
+    /// Whether the reader is at the front of the book.
+    var isAtTheFrontForTest: Bool { currentChapter == 0 }
+
     /// Follow a keyword, the way clicking its tag does.
     ///
     /// Returns the chapter the reader landed on, and whether the term was
@@ -1295,6 +1353,9 @@ private final class ReaderTextView: NSTextView {
     /// The tinted panels drawn behind the text.
     var cards: [ReaderCard] = []
 
+    /// The three numbers on the executive briefing, drawn as a row of cards.
+    var statRow: ReaderStatRow?
+
     /// The term chips, so the reader can be told which one they are over.
     var chips: [ReaderChipInfo] = []
 
@@ -1323,6 +1384,7 @@ private final class ReaderTextView: NSTextView {
     override func draw(_ dirtyRect: NSRect) {
         // The panels are drawn first so the text sits on top of them.
         drawCards(in: dirtyRect)
+        drawStatRow(in: dirtyRect)
         drawFlash(in: dirtyRect)
         super.draw(dirtyRect)
         drawRules(in: dirtyRect)
@@ -1504,10 +1566,7 @@ private final class ReaderTextView: NSTextView {
         guard width > 0 else { return }
 
         for card in cards {
-            let glyphRange = manager.glyphRange(forCharacterRange: card.range, actualCharacterRange: nil)
-            guard glyphRange.length > 0 else { continue }
-            let bounds = manager.boundingRect(forGlyphRange: glyphRange, in: container)
-            guard bounds.height > 0 else { continue }
+            guard let bounds = bounds(of: card, manager: manager, container: container) else { continue }
 
             let rect = NSRect(x: textContainerInset.width,
                               y: bounds.minY + textContainerInset.height,
@@ -1524,6 +1583,115 @@ private final class ReaderTextView: NSTextView {
                 drawBadge(badge, in: rect, card: card, manager: manager)
             }
         }
+    }
+
+    /// The three numbers on the executive briefing, side by side.
+    ///
+    /// They are painted rather than set in the text, because three cards in a
+    /// row have to share the width of the column — and the column is a
+    /// different width in every window. The text leaves a band for them; this
+    /// fills it.
+    private func drawStatRow(in dirtyRect: NSRect) {
+        guard let row = statRow, !row.stats.isEmpty else { return }
+        guard let manager = layoutManager, let container = textContainer else { return }
+
+        manager.ensureLayout(for: container)
+        let glyphRange = manager.glyphRange(forCharacterRange: row.range, actualCharacterRange: nil)
+        guard glyphRange.length > 0 else { return }
+        let line = manager.lineFragmentRect(forGlyphAt: glyphRange.location, effectiveRange: nil)
+
+        // The band's own height is the line's, without the gap the
+        // paragraph leaves under itself: the line fragment carries the gap
+        // too, and a card drawn to the fragment swallows the space that was
+        // meant to come after it.
+        let ink = manager.boundingRect(forGlyphRange: glyphRange, in: container)
+        guard ink.height > 0 else { return }
+
+        // The band is in the container's coordinates; the cards are drawn in
+        // the view's.
+        let band = NSRect(x: textContainerInset.width + line.minX,
+                          y: ink.minY + textContainerInset.height,
+                          width: line.width,
+                          height: ink.height)
+        guard band.intersects(dirtyRect) else { return }
+
+        let gap: CGFloat = 12
+        let count = CGFloat(row.stats.count)
+        let cardWidth = (band.width - gap * (count - 1)) / count
+        guard cardWidth > 40 else { return }
+
+        // The cards are as tall as the tallest of them needs, so that the row
+        // reads as a row and not as three panels of different sizes.
+        let cardHeight = row.stats.map { Self.statHeight(of: $0) }.max() ?? band.height
+
+        for (index, stat) in row.stats.enumerated() {
+            let card = NSRect(x: band.minX + CGFloat(index) * (cardWidth + gap),
+                              y: band.minY,
+                              width: cardWidth,
+                              height: cardHeight)
+            drawReaderCard(card, accent: stat.accent, fillAmount: 0.05)
+            drawStat(stat, in: card)
+        }
+    }
+
+    /// How tall one of the stat cards has to be.
+    ///
+    /// The card is as tall as its own lines and nothing else: a number with
+    /// two words under it makes the card taller than its neighbours, and the
+    /// row has to stay a row.
+    private static func statHeight(of stat: ReaderStat) -> CGFloat {
+        var height: CGFloat = 12
+        height += Self.lineHeight(stat.label, size: 12, weight: .medium) + 3
+        height += Self.lineHeight(stat.value, size: 27, weight: .bold) + 1
+        if let detail = stat.detail {
+            height += Self.lineHeight(detail, size: 13, weight: .semibold)
+        }
+        return height + 12
+    }
+
+    /// The height of one line of text.
+    private static func lineHeight(_ text: String, size: CGFloat, weight: NSFont.Weight) -> CGFloat {
+        NSAttributedString(string: text, attributes: [
+            .font: NSFont.systemFont(ofSize: size, weight: weight)
+        ]).size().height
+    }
+
+    /// The label and the number inside one of the stat cards.
+    ///
+    /// The lines are stacked by measuring them, not by adding up the fonts'
+    /// ascenders and descenders: a number has no descender, and a line put
+    /// below one that has none is measured from the wrong place.
+    private func drawStat(_ stat: ReaderStat, in card: NSRect) {
+        let inset: CGFloat = 14
+        let width = card.width - inset * 2
+        var top = card.minY + 12
+
+        func line(_ text: String, size: CGFloat, weight: NSFont.Weight, colour: NSColor, gap: CGFloat) {
+            let string = NSAttributedString(string: text, attributes: [
+                .font: NSFont.systemFont(ofSize: size, weight: weight),
+                .foregroundColor: resolvedColour(colour)
+            ])
+            let height = string.size().height
+            string.draw(in: NSRect(x: card.minX + inset, y: top, width: width, height: height))
+            top += height + gap
+        }
+
+        line(stat.label, size: 12, weight: .medium, colour: stat.accent, gap: 3)
+        line(stat.value, size: 27, weight: .bold, colour: .labelColor, gap: 1)
+        if let detail = stat.detail {
+            line(detail, size: 13, weight: .semibold, colour: stat.accent, gap: 0)
+        }
+    }
+
+    /// Where a card's text is, in the container's coordinates.
+    private func bounds(of card: ReaderCard,
+                        manager: NSLayoutManager,
+                        container: NSTextContainer) -> NSRect? {
+        let glyphRange = manager.glyphRange(forCharacterRange: card.range, actualCharacterRange: nil)
+        guard glyphRange.length > 0 else { return nil }
+        let bounds = manager.boundingRect(forGlyphRange: glyphRange, in: container)
+        guard bounds.height > 0 else { return nil }
+        return bounds
     }
 
     /// The numbered circle in front of a takeaway.
@@ -1612,7 +1780,7 @@ private final class ReaderTextView: NSTextView {
         guard rule.intersects(dirtyRect) else { return }
 
         let path = NSBezierPath(roundedRect: rule, xRadius: 1.5, yRadius: 1.5)
-        resolvedColour(Palette.accent).setFill()
+        resolvedColour(Palette.teal).setFill()
         path.fill()
     }
 
@@ -1751,6 +1919,18 @@ private final class ReaderChip: NSView {
     /// the row of chips under the title reads at a glance.
     private let colour: NSColor
 
+    /// Called when the chip is clicked.
+    ///
+    /// A chip that does something is a button, and says so with a pointing
+    /// hand.
+    var onClick: (() -> Void)? {
+        didSet {
+            if onClick == nil { NSCursor.arrow.set() }
+            resetCursorRects()
+            window?.invalidateCursorRects(for: self)
+        }
+    }
+
     init(text: String, colour: NSColor = Palette.teal) {
         self.colour = colour
 
@@ -1779,6 +1959,17 @@ private final class ReaderChip: NSView {
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override func mouseDown(with event: NSEvent) {
+        guard let onClick else { return }
+        onClick()
+    }
+
+    override func resetCursorRects() {
+        super.resetCursorRects()
+        guard onClick != nil else { return }
+        addCursorRect(bounds, cursor: .pointingHand)
+    }
 
     /// Re-apply the colours after a light/dark switch.
     ///
@@ -1817,6 +2008,8 @@ private final class BriefingTextBuilder {
         let thesisRange: NSRange?
         /// The panels to draw behind the text.
         let cards: [ReaderCard]
+        /// The three numbers on the briefing, and the band they are painted in.
+        let statRow: ReaderStatRow?
         /// The term chips.
         let chips: [ReaderChipInfo]
         /// The keyword tags.
@@ -1827,6 +2020,7 @@ private final class BriefingTextBuilder {
 
     private let text = NSMutableAttributedString()
     private var cards: [ReaderCard] = []
+    private var statRow: ReaderStatRow?
     private var chips: [ReaderChipInfo] = []
     private var keywordInfos: [ReaderKeywordInfo] = []
     private var ruleRanges: [NSRange] = []
@@ -1842,6 +2036,12 @@ private final class BriefingTextBuilder {
     private static let chipFont = NSFont.systemFont(ofSize: 12, weight: .semibold)
     private static let tagFont = NSFont.systemFont(ofSize: 11, weight: .medium)
     private static let termFont = NSFont.systemFont(ofSize: 15, weight: .semibold)
+    private static let pageTitleFont = NSFont.systemFont(ofSize: 26, weight: .bold)
+    private static let cardLabelFont = NSFont.systemFont(ofSize: 11, weight: .bold)
+    /// A font so small that the words are there and nothing shows.
+    private static let hiddenFont = NSFont.systemFont(ofSize: 1)
+    /// How tall the band of the three numbers is.
+    private static let statBandHeight: CGFloat = 104
 
     // MARK: Building
 
@@ -1852,17 +2052,19 @@ private final class BriefingTextBuilder {
 
         builder.air()
 
-        if !briefing.thesis.isEmpty {
-            builder.heading("Executive Thesis")
-            thesisRange = builder.thesis(briefing.thesis)
+        // The page every book opens on: the deck's executive briefing.
+        builder.briefingHeader()
+        builder.pageTitle("Executive Briefing & Thesis")
+        thesisRange = builder.centralArgument(briefing.thesis)
+        builder.statRow(briefing)
+
+        if !briefing.conclusions.isEmpty {
+            builder.heading("Primary Strategic Conclusions")
+            builder.conclusions(briefing.conclusions)
         }
         if !briefing.executiveSummary.isEmpty {
             builder.heading("Executive Overview")
             builder.paragraph(briefing.executiveSummary)
-        }
-        if !briefing.conclusions.isEmpty {
-            builder.heading("Primary Conclusions")
-            builder.numbered(briefing.conclusions)
         }
         if !briefing.keyPoints.isEmpty {
             builder.heading("Key Points")
@@ -1891,6 +2093,7 @@ private final class BriefingTextBuilder {
                       chapterRanges: chapterRanges,
                       thesisRange: thesisRange,
                       cards: builder.cards,
+                      statRow: builder.statRow,
                       chips: builder.chips,
                       keywords: builder.keywordInfos,
                       ruleRanges: builder.ruleRanges)
@@ -1922,9 +2125,101 @@ private final class BriefingTextBuilder {
         append(body, font: Self.bodyFont, colour: .labelColor, style: Self.bodyStyle())
     }
 
-    /// The thesis: a pull quote, set apart by an indent and a rule.
-    private func thesis(_ body: String) -> NSRange {
-        append(body, font: Self.thesisFont, colour: .secondaryLabelColor, style: Self.thesisStyle())
+    /// The strip at the top of the briefing page.
+    ///
+    /// "Executive Synthesis & Global Thesis" and "Full Manuscript
+    /// Distillation", with a hairline under — the deck's own header, in the
+    /// reader's colours.
+    private func briefingHeader() {
+        let style = Self.briefingHeaderStyle()
+        let start = text.length
+        append("Executive Synthesis & Global Thesis",
+               font: Self.cardLabelFont, colour: Palette.teal, style: style, endsParagraph: false)
+        append("     \u{00B7}     ", font: Self.cardLabelFont, colour: .tertiaryLabelColor,
+               style: style, endsParagraph: false)
+        append("Full Manuscript Distillation",
+               font: Self.cardLabelFont, colour: Palette.green, style: style, endsParagraph: false)
+        endParagraph(font: Self.cardLabelFont, style: style)
+        ruleRanges.append(NSRange(location: start, length: text.length - start))
+    }
+
+    /// The title of the briefing page.
+    private func pageTitle(_ title: String) {
+        append(title, font: Self.pageTitleFont, colour: .labelColor, style: Self.pageTitleStyle())
+    }
+
+    /// The book's central argument, on its own panel.
+    ///
+    /// The deck set the thesis as a pull quote inside a tinted panel, with the
+    /// words "Central Argument" above it. The reader does the same, so the
+    /// page a book opens on is the page the deck showed.
+    ///
+    /// Returns the range of the quote itself, which is what the accent rule
+    /// is drawn beside.
+    private func centralArgument(_ thesis: String) -> NSRange? {
+        let clean = thesis.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !clean.isEmpty else { return nil }
+
+        let cardStart = text.length
+        append("Central Argument",
+               font: Self.cardLabelFont, colour: Palette.teal, style: Self.cardLabelStyle())
+        let quoteStart = text.length
+        append(clean, font: Self.thesisFont, colour: .labelColor, style: Self.thesisStyle())
+        let quoteEnd = text.length
+
+        cards.append(ReaderCard(kind: .thesis,
+                                 range: NSRange(location: cardStart, length: quoteEnd - cardStart)))
+        return NSRange(location: quoteStart, length: quoteEnd - quoteStart)
+    }
+
+    /// The three numbers, side by side.
+    ///
+    /// They are painted rather than set in the text, because three cards in a
+    /// row have to share the width of the column — and the column is a
+    /// different width in every window. The text here is a band: it takes up
+    /// the height the cards need and gives the painter somewhere to put them.
+    private func statRow(_ briefing: Briefing) {
+        let stats = [
+            ReaderStat(label: "Time Saved",
+                       value: "~\(briefing.timeSavedMinutes) min",
+                       detail: nil,
+                       accent: Palette.green),
+            ReaderStat(label: "Original Reading Time",
+                       value: "\(briefing.standardReadingMinutes) min",
+                       detail: nil,
+                       accent: Palette.teal),
+            ReaderStat(label: "Distillation Ratio",
+                       value: "3",
+                       detail: "Takeaways/Ch",
+                       accent: Palette.gold)
+        ]
+
+        // The words are in the text in a colour nobody can see, so that the
+        // numbers can still be found by the find bar and copied out.
+        let hidden = stats
+            .map { [$0.label, $0.value, $0.detail ?? ""].joined(separator: " ") }
+            .joined(separator: "     ")
+
+        let range = append(hidden, font: Self.hiddenFont, colour: .clear,
+                           style: Self.statBandStyle())
+        statRow = ReaderStatRow(stats: stats, range: range)
+    }
+
+    /// The book's primary conclusions, one to a numbered row.
+    private func conclusions(_ items: [String]) {
+        let usable = items.filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        guard !usable.isEmpty else { return }
+
+        for (index, item) in usable.enumerated() {
+            let style = Self.conclusionStyle()
+            let start = text.length
+            append(item, font: Self.bodyFont, colour: .labelColor, style: style, endsParagraph: false)
+            let end = text.length
+            endParagraph(font: Self.bodyFont, style: style)
+            cards.append(ReaderCard(kind: .conclusion,
+                                     range: NSRange(location: start, length: end - start),
+                                     badge: index + 1))
+        }
     }
 
     /// The line that says which chapter this is.
@@ -2086,14 +2381,6 @@ private final class BriefingTextBuilder {
                                  range: NSRange(location: start, length: text.length - start)))
     }
 
-    private func numbered(_ items: [String]) {
-        for (index, item) in items.enumerated() {
-            append("\(index + 1).", font: Self.bodyFont, colour: .tertiaryLabelColor,
-                   style: Self.listStyle(), endsParagraph: false)
-            append("  \(item)", font: Self.bodyFont, colour: .labelColor, style: Self.listStyle())
-        }
-    }
-
     private func bulleted(_ items: [String]) {
         for item in items {
             append("•", font: Self.bodyFont, colour: .tertiaryLabelColor,
@@ -2165,10 +2452,64 @@ private final class BriefingTextBuilder {
         style.lineSpacing = 3
         style.lineHeightMultiple = 1.3
         style.paragraphSpacing = 20
-        // The indent leaves room for the rule; the matching negative tail
-        // indent keeps the right edge of the pull quote with the body.
+        // The indent leaves room for the rule, and it applies to the first
+        // line too — otherwise the quote hangs out to the left of the rule
+        // for its first line only. The quote stops at the edge of the column,
+        // so that it stays inside the card it sits in.
         style.headIndent = 22
-        style.tailIndent = -22
+        style.firstLineHeadIndent = 22
+        return style
+    }
+
+    /// The title of the briefing page.
+    private static func pageTitleStyle() -> NSParagraphStyle {
+        let style = NSMutableParagraphStyle()
+        style.lineSpacing = 3
+        style.lineHeightMultiple = 1.1
+        style.paragraphSpacing = 18
+        return style
+    }
+
+    /// The strip at the top of the briefing page.
+    private static func briefingHeaderStyle() -> NSParagraphStyle {
+        let style = NSMutableParagraphStyle()
+        style.lineHeightMultiple = 1.0
+        style.paragraphSpacing = 12
+        return style
+    }
+
+    /// The label at the top of a card: "Central Argument".
+    private static func cardLabelStyle() -> NSParagraphStyle {
+        let style = NSMutableParagraphStyle()
+        style.lineHeightMultiple = 1.0
+        style.paragraphSpacing = 10
+        style.headIndent = 22
+        style.firstLineHeadIndent = 22
+        return style
+    }
+
+    /// The band the three numbers are painted in.
+    ///
+    /// The line is exactly as tall as the cards need, so the cards have the
+    /// room they take and no more.
+    private static func statBandStyle() -> NSParagraphStyle {
+        let style = NSMutableParagraphStyle()
+        style.lineHeightMultiple = 1.0
+        style.minimumLineHeight = statBandHeight
+        style.maximumLineHeight = statBandHeight
+        style.paragraphSpacing = 18
+        return style
+    }
+
+    /// A conclusion: the text sits clear of the badge in the gutter, and
+    /// every line lines up with the first.
+    private static func conclusionStyle() -> NSParagraphStyle {
+        let style = NSMutableParagraphStyle()
+        style.lineSpacing = 5
+        style.lineHeightMultiple = 1.3
+        style.paragraphSpacing = 6
+        style.headIndent = 34
+        style.firstLineHeadIndent = 34
         return style
     }
 

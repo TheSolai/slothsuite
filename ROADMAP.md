@@ -540,6 +540,88 @@ it.
 the reader's area at 1320 points wide. `reader.popout` opens the reader's own
 window and closes it again. All three are in the gate.
 
+## Phase 11 — the front of the book
+
+*"All books should start with this. Improve the right click menu with send to
+notes etc, also the ... on each book does nothing."*
+
+Three complaints about the same thing: the reader opened in the middle of a
+book instead of at the front of it, the library's menu did nothing, and the
+one action the library offered — open the book — gave you no more than the
+book's title.
+
+### Every book opens on its briefing
+
+The deck's first slide was the best page in the app: the central argument as
+a pull quote, the three numbers side by side, the primary conclusions as
+numbered rows. The native reader had all the pieces but not the page, so the
+reader opened where the reader last was and the deck's opening was a screen
+away in a browser.
+
+Now the briefing is the front of the book. A book opens on it, in the deck's
+shape: the strip that says *Executive Synthesis & Global Thesis · Full
+Manuscript Distillation*, the page title, the **Central Argument** on a teal
+panel with a rule down its margin, the three numbers in the deck's own
+colours, and the **Primary Strategic Conclusions** one to a numbered row.
+
+The three numbers are painted, not set. Three cards in a row have to share
+the width of the column, and the column is a different width in every
+window, so a fixed position in the text cannot follow it. The text leaves a
+band of exactly the right height and the reader paints the cards into it,
+measuring each line rather than adding up the fonts' ascenders and
+descenders — a number has no descender, and a line put below one that has
+none is measured from the wrong place.
+
+### The place is offered, not imposed
+
+Opening a book on its briefing must not cost the reader their place, and the
+briefing is the front of the book rather than a place in it. So the header
+carries a **Continue at Chapter 12** chip whenever there is one, and the
+store refuses to write chapter zero over a saved chapter: opening a book
+never destroys where you were.
+
+The library's **Continue reading** button is the one thing that takes you
+straight back, because that is what its name says.
+
+### The card's menu works, and it does more
+
+The **⋯** button on a book card used to open an empty menu: the closure built
+a menu of its own and threw it away, so the items went into a menu nobody
+ever saw. A right-click did nothing at all.
+
+Both now open the same list, and the list does more: **Open**, **Send to
+Notes…**, **Add a note…**, **Speak the summary…**, **Export as separate
+files…**, **Favourite**, **Mark as read** and **Remove from library** — with
+the two state-dependent entries saying which way round they are for that
+book.
+
+### Send to Notes
+
+**Send to Notes** turns a book's briefing into a note: the central argument,
+the executive summary, the primary conclusions and the key points, as plain
+text the notes editor can hold, and it opens the note in the Notes module
+with the book and its chapter attached.
+
+It needed one fix to be reliable. The briefing store answered a second
+caller for a document that was already being fetched with nothing at all, so
+the menu item waited for an answer that never came — the same shape of bug
+as the empty menu: the work happened, and nobody saw it. Callers who arrive
+while a load is running are now kept, and answered.
+
+### How it is checked
+
+- `reader.briefing` checks that the briefing page is there in the deck's
+  shape — the title, the central argument, the three numbers and the
+  conclusions.
+- `reader.opening` opens a book and checks it opened on its briefing.
+- `reader.keepsplace` checks the place the reader had survived that opening.
+- `library.menu` and `library.rightclick` drive both paths to the card's
+  menu and check they offer the same eleven items.
+- `notes.send` sends a book's briefing to the notes and checks the note has
+  the headings in it.
+
+All five are in the gate.
+
 ## Phase 7 — the fourth ten: a learning desk that remembers
 
 *"Now make 10 QoL improvements."* Every one of these was a gap found by
@@ -728,7 +810,7 @@ Building the gate found four real defects that had been invisible:
 
 ## Verified
 
-The gate (`./build.sh test`) is green at **46/46**, exit 0:
+The gate (`./build.sh test`) is green at **60/60**, exit 0:
 
 ```
 config.apps, config.services, stack.script, stack.ports.read,
@@ -737,10 +819,14 @@ bridge.status, library.documents, module.library, module.reader,
 module.notes, module.review, module.app, learning.note, learning.favourite,
 learning.read, learning.cleanup, notes.button, notes.create, notes.list,
 notes.editor, notes.autosave, notes.survive, notes.cleanup, briefing.fetch,
+briefing.shape, reader.chips, reader.keywords, reader.follows, reader.pillars,
+reader.width, reader.briefing, reader.popout, reader.opening,
+reader.keepsplace, notes.send, library.menu, library.rightclick,
 web.endpoint.read, provider.endpoint, mac.service, mac.chat, mac.speak,
 selftest.fixture, filepicker.fired, upload.pipeline, reader.position,
 reader.persist, notes.chapter, notes.export, library.sort, library.bulk,
-review.schedule, review.lapse, review.cleanup
+review.schedule, review.lapse, review.cleanup, learning.cleanup,
+learning.lastread
 ```
 
 The six `notes.*` checks are the end-to-end ones: the real **New Note**
@@ -755,6 +841,12 @@ note and its chapter, the library putting itself in order, and the review
 schedule moving a note out of the way when it is remembered and bringing it
 back when it is forgotten. They use ids of their own and take their litter
 away again, so the user's own notes are never touched.
+
+The `library.menu`, `library.rightclick` and `notes.send` checks drive the
+card's menu the way a person does — both ways in — and then take the note
+they made away again. The whole learning store is snapshotted at the start
+of the run and put back at the end, so a run leaves the reader's own notes,
+places and favourites exactly as it found them.
 
 The gate cleans up after itself: the document it uploads is deleted again
 before the run ends, so a gate that runs on every build does not leave a

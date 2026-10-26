@@ -317,7 +317,10 @@ final class LearningStore {
     func markReading(documentId: String, chapter: Int = 0) {
         mutate { state in
             state.lastReadDocumentId = documentId
-            state.lastReadChapter = chapter
+            // The briefing is the front of the book, not a place in it. A book
+            // that opens on its briefing must not forget the chapter the
+            // reader was last in.
+            if chapter > 0 { state.lastReadChapter = chapter }
         }
         commit()
     }
@@ -385,6 +388,10 @@ final class LearningStore {
     /// the library and the notes for nothing. The card shows the chapter,
     /// and that changes are announced by `markReading`.
     func setPosition(documentId: String, chapter: Int, scroll: Double) {
+        // Chapter zero is the briefing, which every book opens on. Writing it
+        // over a saved place would throw the reader's place away every time
+        // they opened a book, so it is not a place and is not written.
+        guard chapter > 0 else { return }
         let clamped = min(max(scroll, 0), 1)
         mutate { state in
             state.positions[documentId] = ReadingPosition(

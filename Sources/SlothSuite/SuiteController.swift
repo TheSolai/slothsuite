@@ -58,15 +58,14 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
 
     /// The document currently open in the reader.
     private var openDocumentId: String?
+    /// Where the reader asked to open, when it is not the front of the book.
+    private var openOpening: ReaderOpening?
 
     /// Set while one reader is being moved because the other one moved.
     ///
     /// The reader can be in two windows at once, and a move in one of them
     /// moves the other. Without this the two would chase each other.
     private var isMovingReaders = false
-
-    /// The chapter the reader should open at, when one was asked for.
-    private var openChapter: Int?
 
     /// Pins the content view to the window's content area.
     private var contentSizeConstraints: (width: NSLayoutConstraint, height: NSLayoutConstraint)?
@@ -572,6 +571,9 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
         libraryView.onAddNote = { [weak self] document in
             self?.startNote(for: document)
         }
+        libraryView.onSendToNotes = { [weak self] document in
+            self?.sendToNotes(document)
+        }
         libraryView.onContinue = { [weak self] in
             self?.continueReading()
         }
@@ -638,7 +640,7 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
             guard !note.documentId.isEmpty else { return }
             // A note knows the chapter it was taken from, so it opens there.
             self?.openDocument(id: note.documentId,
-                               chapter: note.chapter > 0 ? note.chapter : nil)
+                               opening: note.chapter > 0 ? .chapter(note.chapter, 0) : nil)
         }
         notesView.onSearch = { [weak self] query in
             self?.filterNotes(query)
@@ -659,7 +661,7 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
         reviewView.onOpenDocument = { [weak self] note in
             guard !note.documentId.isEmpty else { return }
             self?.openDocument(id: note.documentId,
-                               chapter: note.chapter > 0 ? note.chapter : nil)
+                               opening: note.chapter > 0 ? .chapter(note.chapter, 0) : nil)
         }
 
         // The wrapped web app.
@@ -966,25 +968,28 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
             readerView.showUnavailable(message: "Pick a document from the Library to read its briefing.")
             return
         }
-        renderBriefing(for: document, at: openChapter)
-        openChapter = nil
+        renderBriefing(for: document, opening: openOpening)
+        openOpening = nil
     }
 
     /// Put a document's briefing into the reader.
     ///
-    /// `chapter` asks for a particular chapter — a note links to the one it
-    /// was taken from. Without it the reader goes back to where they left
-    /// off, which is the point of remembering a place.
-    private func renderBriefing(for document: LibraryDocument, at chapter: Int? = nil) {
+    /// A book opens on its executive briefing: the page that says what the
+    /// book is about, in the deck's shape. A reader who asked for a chapter
+    /// — a note links to one, the library's "continue reading" button — is
+    /// taken there instead.
+    ///
+    /// The place the reader left is kept and offered on the briefing, so a
+    /// book that opens at the front does not cost them their place.
+    private func renderBriefing(for document: LibraryDocument, opening: ReaderOpening? = nil) {
         openDocumentId = document.id
 
-        let position = chapter.map {
-            ReadingPosition(chapter: $0, scroll: 0, updatedAt: Date())
-        } ?? LearningStore.shared.position(for: document.id)
+        let saved = LearningStore.shared.position(for: document.id)
+        let start = opening ?? .briefing
 
         // Already fetched once — render it straight away.
         if let briefing = BriefingStore.shared.briefing(documentId: document.id) {
-            readerView.show(briefing: briefing, restoring: position)
+            readerView.show(briefing: briefing, opening: start, saved: saved)
             return
         }
 
@@ -999,7 +1004,7 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
                 )
                 return
             }
-            self.readerView.show(briefing: briefing, restoring: position)
+            self.readerView.show(briefing: briefing, opening: start, saved: saved)
         }
     }
 
@@ -1105,8 +1110,13 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
             return
         }
 
-        let position = openDocumentId.flatMap { LearningStore.shared.position(for: $0) }
-        ReaderWindowController.shared.show(briefing: briefing, position: position)
+        // The pop-out is a second window onto the same book, so it opens
+        // where the reader in the suite is — not where the book was left.
+        let chapter = readerView.currentChapterIndex
+        let scroll = readerView.scrollFraction()
+        let opening: ReaderOpening = chapter > 0 ? .chapter(chapter, scroll) : .briefing
+        let saved = openDocumentId.flatMap { LearningStore.shared.position(for: $0) }
+        ReaderWindowController.shared.show(briefing: briefing, opening: opening, saved: saved)
     }
 
     // MARK: - Menu
@@ -1760,13 +1770,14 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
     /// The briefing is fetched from the backend and rendered natively, so the
     /// reader works even when the wrapped app is not running.
     ///
-    /// `chapter` asks for a particular chapter, which is how a note links
-    /// back to the place it was taken from.
-    private func openDocument(id: String, chapter: Int? = nil) {
+    /// `opening` asks for a particular place, which is how a note links back
+    /// to the chapter it was taken from. Without it the book opens on its
+    /// executive briefing.
+    private func openDocument(id: String, opening: ReaderOpening? = nil) {
         guard LibraryStore.shared.document(id: id) != nil else { return }
 
         openDocumentId = id
-        openChapter = chapter
+        openOpening = opening
         // The reader picks up whatever was last opened, so the order matters:
         // remember it first, then switch.
         LearningStore.shared.markReading(documentId: id)
@@ -1792,19 +1803,94 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
     }
 
     /// Resume the last document that was being read.
+    ///
+    /// "Continue" means the place they left, not the front of the book: it is
+    /// the one thing the reader asked for by name.
     private func continueReading() {
         guard let id = LearningStore.shared.lastReadDocumentId else {
             presentError(title: "Nothing to continue",
                          message: "You have not opened a document yet.")
             return
         }
-        openDocument(id: id)
+        var opening: ReaderOpening?
+        if let saved = LearningStore.shared.position(for: id), saved.chapter > 0 {
+            opening = .chapter(saved.chapter, saved.scroll)
+        }
+        openDocument(id: id, opening: opening)
     }
 
     // MARK: - Notes
 
     private func startNote(for document: LibraryDocument) {
         startNote(forDocumentId: document.id, title: document.title)
+    }
+
+    /// Send a book's briefing to the notes.
+    ///
+    /// The note is the briefing in the shape a note can hold: the central
+    /// argument, the summary, the conclusions and the key points, as plain
+    /// text the reader can edit.
+    private func sendToNotes(_ document: LibraryDocument) {
+        guard let spec = specs.first(where: { $0.supportsLibrary }) else {
+            presentError(title: "Nothing to send yet",
+                         message: "The library app is not available, so the briefing cannot be fetched.")
+            return
+        }
+
+        BriefingStore.shared.load(documentId: document.id, spec: spec) { [weak self] briefing in
+            guard let self else { return }
+            guard let briefing else {
+                self.presentError(title: "Nothing to send yet",
+                                  message: "The briefing for \u{201C}\(document.title)\u{201D} is not ready yet. "
+                                         + "It appears as soon as the synthesis finishes.")
+                return
+            }
+            self.makeNote(from: briefing, for: document)
+        }
+    }
+
+    /// Put a briefing into a note and open it.
+    private func makeNote(from briefing: Briefing, for document: LibraryDocument) {
+        let note = LearningStore.shared.addNote(documentId: document.id,
+                                                documentTitle: document.title,
+                                                body: Self.noteBody(for: briefing))
+        showModule("notes")
+        notesView.show(notes: LearningStore.shared.allNotes)
+        notesView.select(noteId: note.id)
+    }
+
+    /// The briefing as a note.
+    ///
+    /// The notes editor is a plain text view, so the body is plain text: the
+    /// headings the deck had, and the content under them.
+    private static func noteBody(for briefing: Briefing) -> String {
+        var lines: [String] = []
+
+        if !briefing.thesis.isEmpty {
+            lines.append("CENTRAL ARGUMENT")
+            lines.append(briefing.thesis)
+            lines.append("")
+        }
+        if !briefing.executiveSummary.isEmpty {
+            lines.append("EXECUTIVE SUMMARY")
+            lines.append(briefing.executiveSummary)
+            lines.append("")
+        }
+        if !briefing.conclusions.isEmpty {
+            lines.append("PRIMARY CONCLUSIONS")
+            for (index, item) in briefing.conclusions.enumerated() {
+                lines.append("\(index + 1). \(item)")
+            }
+            lines.append("")
+        }
+        if !briefing.keyPoints.isEmpty {
+            lines.append("KEY POINTS")
+            for item in briefing.keyPoints {
+                lines.append("\u{2022} \(item)")
+            }
+        }
+
+        return lines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     /// Create a note and open it in the notes module.
@@ -2234,6 +2320,7 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
     var configForTest: SuiteConfig { config }
     var currentSpecForTest: AppSpec { current }
     var notesViewForTest: NotesView { notesView }
+    var libraryViewForTest: LibraryView { libraryView }
     var readerViewForTest: ReaderView { readerView }
 
     func webViewForTest(_ id: String) -> WKWebView? { webViews[id] }
@@ -2248,6 +2335,16 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
 
     /// Put the reader in a window of its own, for the self-test.
     func togglePopOutForTest() { togglePopOut() }
+
+    /// Open a document the way opening a book does.
+    func openDocumentForTest(id: String, opening: ReaderOpening) {
+        openDocument(id: id, opening: opening)
+    }
+
+    /// Send a book's briefing to the notes, the way the card's menu does.
+    func sendToNotesForTest(_ document: LibraryDocument) {
+        sendToNotes(document)
+    }
 
     /// Is the reader's own window open?
     var popOutIsOpenForTest: Bool { ReaderWindowController.shared.isOpen }

@@ -97,6 +97,24 @@ final class LibraryGridLayout: NSCollectionViewFlowLayout {
 /// This is the suite's front door. The old layout put a cramped list of
 /// document names in the sidebar, which made the library feel like a side
 /// note rather than the main event.
+/// A collection view that can offer a menu for the item under the pointer.
+///
+/// A right-click on a book should offer the same things as the card's "…"
+/// button. The menu is built when it is opened rather than when the card is
+/// made, so it always says what the book can do now.
+final class LibraryCollectionView: NSCollectionView {
+    /// Builds the menu for an item.
+    var menuBuilder: ((NSMenu, Int) -> Void)?
+
+    override func menu(for event: NSEvent) -> NSMenu? {
+        let point = convert(event.locationInWindow, from: nil)
+        guard let indexPath = indexPathForItem(at: point) else { return nil }
+        let menu = NSMenu()
+        menuBuilder?(menu, indexPath.item)
+        return menu
+    }
+}
+
 final class LibraryView: NSView, NSCollectionViewDataSource, NSCollectionViewDelegate {
 
     var onOpen: ((LibraryDocument) -> Void)?
@@ -107,13 +125,15 @@ final class LibraryView: NSView, NSCollectionViewDataSource, NSCollectionViewDel
     var onToggleFavourite: ((LibraryDocument) -> Void)?
     var onToggleRead: ((LibraryDocument) -> Void)?
     var onAddNote: ((LibraryDocument) -> Void)?
+    /// The user wants the book's briefing turned into a note.
+    var onSendToNotes: ((LibraryDocument) -> Void)?
     var onFilterChange: ((LibraryFilter) -> Void)?
     var onSortChange: ((LibrarySort) -> Void)?
     /// Called with true to mark everything read, false to mark it unread.
     var onBulkRead: ((Bool) -> Void)?
     var onContinue: (() -> Void)?
 
-    private let collectionView = NSCollectionView()
+    private let collectionView = LibraryCollectionView()
     private let titleLabel = NSTextField(labelWithString: "Library")
     private let countLabel = NSTextField(labelWithString: "")
     private let searchField = NSSearchField()
@@ -316,6 +336,13 @@ final class LibraryView: NSView, NSCollectionViewDataSource, NSCollectionViewDel
         collectionView.backgroundColors = [.clear]
         collectionView.register(LibraryCardItem.self, forItemWithIdentifier: LibraryCardItem.identifier)
         collectionView.translatesAutoresizingMaskIntoConstraints = false
+
+        // A right-click on a book offers the same menu as the card's "…"
+        // button.
+        collectionView.menuBuilder = { [weak self] menu, item in
+            guard let self, item < self.documents.count else { return }
+            self.makeMenu(for: self.documents[item], into: menu)
+        }
 
         scrollView.documentView = collectionView
         scrollView.hasVerticalScroller = true
@@ -521,53 +548,7 @@ final class LibraryView: NSView, NSCollectionViewDataSource, NSCollectionViewDel
             }
             card.onMenu = { [weak self] menu in
                 guard let self, indexPath.item < self.documents.count else { return }
-                let document = self.documents[indexPath.item]
-                let menu = NSMenu()
-                let open = NSMenuItem(title: "Open", action: #selector(handleCardMenu(_:)), keyEquivalent: "")
-                open.target = self
-                open.representedObject = document.id
-                open.tag = LibraryCardMenuTag.open
-                menu.addItem(open)
-
-                let export = NSMenuItem(title: "Export as separate files…", action: #selector(handleCardMenu(_:)), keyEquivalent: "")
-                export.target = self
-                export.representedObject = document.id
-                export.tag = LibraryCardMenuTag.export
-                menu.addItem(export)
-
-                let speak = NSMenuItem(title: "Speak the summary…", action: #selector(handleCardMenu(_:)), keyEquivalent: "")
-                speak.target = self
-                speak.representedObject = document.id
-                speak.tag = LibraryCardMenuTag.speak
-                menu.addItem(speak)
-
-                let note = NSMenuItem(title: "Add a note…", action: #selector(handleCardMenu(_:)), keyEquivalent: "")
-                note.target = self
-                note.representedObject = document.id
-                note.tag = LibraryCardMenuTag.note
-                menu.addItem(note)
-
-                menu.addItem(.separator())
-
-                let favourite = NSMenuItem(title: "Favourite", action: #selector(handleCardMenu(_:)), keyEquivalent: "")
-                favourite.target = self
-                favourite.representedObject = document.id
-                favourite.tag = LibraryCardMenuTag.favourite
-                menu.addItem(favourite)
-
-                let read = NSMenuItem(title: "Mark as read", action: #selector(handleCardMenu(_:)), keyEquivalent: "")
-                read.target = self
-                read.representedObject = document.id
-                read.tag = LibraryCardMenuTag.read
-                menu.addItem(read)
-
-                menu.addItem(.separator())
-
-                let delete = NSMenuItem(title: "Remove from library", action: #selector(handleCardMenu(_:)), keyEquivalent: "")
-                delete.target = self
-                delete.representedObject = document.id
-                delete.tag = LibraryCardMenuTag.delete
-                menu.addItem(delete)
+                self.makeMenu(for: self.documents[indexPath.item], into: menu)
             }
             card.onToggleFavourite = { [weak self] in
                 guard let self, indexPath.item < self.documents.count else { return }
@@ -581,12 +562,89 @@ final class LibraryView: NSView, NSCollectionViewDataSource, NSCollectionViewDel
         return item
     }
 
+    /// The menus a book can be asked for.
+    ///
+    /// Both paths are checked, because they are two ways to the same list and
+    /// they can break apart: the card's "…" button used to open an empty
+    /// menu, and a right-click used to do nothing at all.
+    func cardMenusForTest() -> (button: [String], rightClick: [String]) {
+        guard let document = documents.first else { return ([], []) }
+
+        let menu = NSMenu()
+        makeMenu(for: document, into: menu)
+        let button = menu.items.map { $0.title }
+
+        var rightClick: [String] = []
+        if let indexPath = collectionView.indexPathsForVisibleItems().first,
+           let attributes = collectionView.collectionViewLayout?
+            .layoutAttributesForItem(at: indexPath) {
+            let centre = NSPoint(x: attributes.frame.midX, y: attributes.frame.midY)
+            let inWindow = collectionView.convert(centre, to: nil)
+            if let event = NSEvent.mouseEvent(with: .rightMouseDown,
+                                              location: inWindow,
+                                              modifierFlags: [],
+                                              timestamp: 0,
+                                              windowNumber: collectionView.window?.windowNumber ?? 0,
+                                              context: nil,
+                                              eventNumber: 0,
+                                              clickCount: 1,
+                                              pressure: 1),
+               let menu = collectionView.menu(for: event) {
+                rightClick = menu.items.map { $0.title }
+            }
+        }
+        return (button, rightClick)
+    }
+
     func collectionView(_ collectionView: NSCollectionView, didSelectItemsAt indexPaths: Set<IndexPath>) {
         guard let indexPath = indexPaths.first, indexPath.item < documents.count else { return }
         onOpen?(documents[indexPath.item])
     }
 
     // MARK: - Card menu
+
+    /// The menu for a book.
+    ///
+    /// The same menu is used by the card's "…" button and by a right-click
+    /// on the card, so there is one list of what a book can be asked to do.
+    private func makeMenu(for document: LibraryDocument, into menu: NSMenu) {
+        let learning = LearningStore.shared
+
+        func entry(_ title: String,
+                   _ tag: Int,
+                   _ key: String = "",
+                   _ modifiers: NSEvent.ModifierFlags = .command) {
+            let item = NSMenuItem(title: title,
+                                  action: #selector(handleCardMenu(_:)),
+                                  keyEquivalent: key)
+            item.target = self
+            item.representedObject = document.id
+            item.tag = tag
+            if !key.isEmpty { item.keyEquivalentModifierMask = modifiers }
+            menu.addItem(item)
+        }
+
+        entry("Open", LibraryCardMenuTag.open, "o")
+        menu.addItem(.separator())
+
+        entry("Send to Notes…", LibraryCardMenuTag.sendToNotes, "n", [.command, .shift])
+        entry("Add a note…", LibraryCardMenuTag.note)
+        entry("Speak the summary…", LibraryCardMenuTag.speak, "s")
+        entry("Export as separate files…", LibraryCardMenuTag.export, "e")
+
+        menu.addItem(.separator())
+
+        let favourite = learning.isFavourite(documentId: document.id)
+        entry(favourite ? "Remove from Favourites" : "Favourite",
+              LibraryCardMenuTag.favourite, "d")
+        let read = learning.isRead(documentId: document.id)
+        entry(read ? "Mark as unread" : "Mark as read",
+              LibraryCardMenuTag.read, "r")
+
+        menu.addItem(.separator())
+
+        entry("Remove from library", LibraryCardMenuTag.delete, "\u{8}")
+    }
 
     @objc func handleCardMenu(_ sender: NSMenuItem) {
         guard let id = sender.representedObject as? String,
@@ -597,6 +655,7 @@ final class LibraryView: NSView, NSCollectionViewDataSource, NSCollectionViewDel
         case LibraryCardMenuTag.speak: onSpeak?(document)
         case LibraryCardMenuTag.delete: onDelete?(document)
         case LibraryCardMenuTag.note: onAddNote?(document)
+        case LibraryCardMenuTag.sendToNotes: onSendToNotes?(document)
         case LibraryCardMenuTag.favourite: onToggleFavourite?(document)
         case LibraryCardMenuTag.read: onToggleRead?(document)
         default: break
@@ -612,6 +671,7 @@ enum LibraryCardMenuTag {
     static let note = 5
     static let favourite = 6
     static let read = 7
+    static let sendToNotes = 8
 }
 
 // MARK: - The card
