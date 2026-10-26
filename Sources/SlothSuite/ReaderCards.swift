@@ -34,14 +34,17 @@ struct ReaderCard: Equatable {
             }
         }
 
-        /// The wash behind the card.
-        var fill: NSColor {
+        /// How much of the accent the card is washed with.
+        ///
+        /// The wash is the same everywhere; only its strength changes with
+        /// what the card holds.
+        var fillAmount: CGFloat {
             switch self {
-            case .takeaway: return Palette.wash(Palette.accent, amount: 0.06)
-            case .tips: return Palette.wash(Palette.green, amount: 0.07)
-            case .hints: return Palette.wash(Palette.gold, amount: 0.09)
-            case .audio: return Palette.wash(Palette.teal, amount: 0.08)
-            case .overview: return Palette.wash(Palette.blue, amount: 0.05)
+            case .takeaway: return 0.07
+            case .tips: return 0.07
+            case .hints: return 0.08
+            case .audio: return 0.07
+            case .overview: return 0.06
             }
         }
     }

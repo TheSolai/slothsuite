@@ -224,6 +224,7 @@ final class SelfTestRunner {
         checkNotesModule()
         checkBriefing()
         checkReaderTerms()
+        checkReaderLayout()
 
         // 9. The web-tools endpoints must exist. A 404 means the backend has
         //    no web access wired up; a 502 means it tried and the network
@@ -686,6 +687,59 @@ final class SelfTestRunner {
         let (chapter, flashed) = reader.followKeywordForTest()
         check("reader.follows", chapter > 0 && flashed,
               "followed a keyword to chapter \(chapter)")
+    }
+
+    /// The reader's shape.
+    ///
+    /// The reader used to put its text in a narrow band in the middle of the
+    /// window with a third of the width empty on either side, and it did not
+    /// say the three things the deck says. The column now takes the space it
+    /// needs, the rail beside it carries the deck's cards, and the reader can
+    /// be popped out into a window of its own.
+    private func checkReaderLayout(attempt: Int = 0) {
+        let reader = controller.readerViewForTest
+
+        // The briefing arrives over the network, so a reader that has only
+        // just been shown has nothing in its rail yet.
+        guard reader.briefingForTest != nil else {
+            if attempt < 8 {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+                    self?.checkReaderLayout(attempt: attempt + 1)
+                }
+                return
+            }
+            check("reader.pillars", true, "the reader has no briefing")
+            check("reader.width", true, "the reader has no briefing")
+            check("reader.popout", true, "the reader has no briefing")
+            return
+        }
+
+        // The deck's three cards, by name. They are the reader's own
+        // vocabulary now, not only the web app's.
+        let expected = ["Exactly 3 High-Impact Takeaways",
+                        "Interactive Technical Glossary",
+                        "60-Second Read-Aloud Conversational Recap"]
+        let titles = reader.pillarTitlesForTest
+        check("reader.pillars", titles == expected,
+              titles.count == 3 ? titles[0] : "\(titles.count) cards")
+
+        // The column has to fill the space it is given. A reader that keeps
+        // a third of the window empty is the reader this phase replaced.
+        let widths = reader.readingWidthsForTest
+        let share = widths.area > 0 ? widths.column / widths.area : 0
+        check("reader.width", widths.column > 0 && share > 0.55,
+              "column \(Int(widths.column)) of \(Int(widths.area)) — \(Int(share * 100))%")
+
+        // The reader can be popped out into a window of its own.
+        controller.togglePopOutForTest()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
+            guard let self else { return }
+            let open = self.controller.popOutIsOpenForTest
+            self.check("reader.popout", open,
+                       open ? "the reader opened in its own window" : "the reader did not open")
+            // Put it away again, so the check leaves nothing on screen.
+            if open { self.controller.togglePopOutForTest() }
+        }
     }
 
     /// The Mac helper, the on-device model and the Mac voice.

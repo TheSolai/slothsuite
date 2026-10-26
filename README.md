@@ -407,6 +407,43 @@ and hand back "The second central idea" as a key term. Those are recognised
 and dropped, and the terms are made up from the glossary and the chapter's
 own vocabulary instead, so a chapter always shows real terms.
 
+## The reader, in a window of its own
+
+The reader can be popped out of the suite into a window of its own — the
+**Pop out** button in the reader's header. A long chapter, a wide measure or a
+second screen are all reasons to want the reader on its own, and the suite's
+window has a sidebar, a library and a reader sharing one space.
+
+The pop-out is not a picture of the reader. It is a second reader on the same
+book, and the two are kept in step: when one of them moves to another place
+in the book, the other follows it, and there is only ever one place in the
+book you are at.
+
+A place is reported with the document it belongs to. A reader in the pop-out
+can be showing a different book from the one in the suite, and a report from
+one of them must not be written against whichever document the other one
+happens to have open — that is how a book's place ends up overwritten by
+another book's.
+
+## One card language
+
+The reader, the band of numbers at the top, the chapters window and the
+pop-up over a term all draw their panels from one routine
+(`ReaderStyle.drawReaderCard`). One radius, one wash, one hairline. The
+numbered circles in front of the takeaways are the same circles in the
+chapters window, and they are painted rather than pasted in as images so that
+they follow the system appearance.
+
+The band at the top of the reader used to be a white panel on a white window —
+a panel you could not see. It carries the numbers that describe the book, so
+it is a card now.
+
+Every panel in the suite is laid out with stated heights rather than with
+frames set by hand. A label whose text wraps has no height of its own, and a
+height that is not stated is a height that something else decides: the text
+is measured at the width it will be given, and the measurement becomes the
+constraint.
+
 ## The reader's vocabulary
 
 A book's terms are the reader's way into it, so the reader treats them as

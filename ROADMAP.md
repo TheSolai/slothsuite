@@ -450,6 +450,96 @@ snapshot showed a reader with no text in it and a header 850 points tall.
 and definition. `reader.follows` clicks a keyword and checks that the reader
 landed on a chapter and flashed the term. Both are in the gate.
 
+## Phase 10 — the reader you can see
+
+*"These are so different, I don't want cursive writing, but look at how the
+1st screen is so cramped. 'Exactly 3 High-Impact Takeaways' is missing — why
+did you lose this? The reader isn't using enough of the screen, there should
+also be the option to pop it out. Remove the hacktober stuff and unify the
+graphics in the gui."*
+
+Three things were wrong at once: the reader was a narrow column floating in
+the middle of a wide window, the deck's own words were missing from it, and
+the web app was wearing an event's branding and a brush-script font.
+
+### The column takes the space it is given
+
+The reader's text was capped at 660 points inside a 1036-point area, so a
+third of the window was empty on both sides of the column. The reading column
+is now as wide as it should be — around 700 points of text — and the rest of
+the width is a rail.
+
+The split is worked out by hand rather than by Auto Layout, because how much
+each side gets depends on how wide the window is and Auto Layout cannot
+decide that without being told. Below 640 points of column the rail goes
+away rather than squeezing the text.
+
+### The rail says the deck's three things
+
+The wrapped deck opened with three cards: the rule of three, the interactive
+glossary and the spoken recap. The native reader has the same three things,
+so it says the same three things — in the deck's own words, including
+"Exactly 3 High-Impact Takeaways" and the line about there being no
+wall-of-text fatigue.
+
+But the cards are live. Each one shows the chapter that is on screen: the
+chapter's three takeaways, the chapter's key terms as chips, and a button
+that reads the chapter aloud. The sound card says the Mac's own voice rather
+than a cloud one, because the suite is offline and promising a fallback it
+does not have would be a lie told in a footnote.
+
+### The reader can be popped out
+
+The **Pop out** button opens the reader in a window of its own. It is not a
+picture of the reader — it is a second reader on the same book, and the two
+are kept in step: when one moves to another place, the other follows.
+
+### One card language
+
+The reader, the band of numbers at the top, the chapters window and the
+pop-up over a term now draw their panels from one routine. One radius, one
+wash, one hairline, and the same numbered circles. The band used to be a
+white panel on a white window — a panel you could not see.
+
+### The web app: no brush script, no event
+
+The deck was wearing Alex Brush, a brush script, for its display headings and
+Caveat, a handwriting face, for its annotations. Neither is fetched any more,
+which matters: they were requests to fonts.googleapis.com, and the suite's
+promise is that it works with no network at all. The script face now falls
+back to the serif that was already loaded and the handwriting face to the
+sans.
+
+"Hacktoberfest" is gone from every file in the web app: the nav link, the
+badge over the hero, the footer, the author byline, the audience line, the
+blurb and the backend's own export. The event's name is replaced by the
+International Sloth Day, which is the thing the app was actually made for.
+
+### Two bugs worth writing down
+
+- **A label with no stated height is a height something else decides.** The
+  rail's cards were laid out by hand at first, and a label whose text wraps
+  has no intrinsic height — so Auto Layout took over and gave every one of
+  them its intrinsic size: one line, as wide as the text, all at the same
+  place. The fix was to measure the text at the width it would be given and
+  make the measurement a constraint.
+- **A place must say which book it belongs to.** The pop-out is a second
+  reader, and a report from it used to be written against whichever document
+  the suite happened to have open. Now every place carries its document, so a
+  report from one reader cannot overwrite another book's place.
+
+The pop-up over a term was also 0 × 0 — it had a frame of its own, so its
+constraints were ignored and it was never given a size. It had been broken
+before this phase and nothing caught it, because nothing had ever captured
+it.
+
+### How it is checked
+
+`reader.pillars` checks that the rail carries the deck's three headings.
+`reader.width` checks that the column fills the space it is given — 72% of
+the reader's area at 1320 points wide. `reader.popout` opens the reader's own
+window and closes it again. All three are in the gate.
+
 ## Phase 7 — the fourth ten: a learning desk that remembers
 
 *"Now make 10 QoL improvements."* Every one of these was a gap found by

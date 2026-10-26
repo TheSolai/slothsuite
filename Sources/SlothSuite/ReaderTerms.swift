@@ -273,6 +273,11 @@ final class ReaderTermPopUpView: NSView {
     private let definitionLabel = NSTextField(wrappingLabelWithString: "")
     private let stack = NSStackView()
 
+    /// The height the term takes.
+    private var titleHeight: NSLayoutConstraint?
+    /// The height the definition takes.
+    private var definitionHeight: NSLayoutConstraint?
+
     /// The width the pop-up is laid out at.
     private static let width: CGFloat = 300
 
@@ -283,13 +288,16 @@ final class ReaderTermPopUpView: NSView {
 
         super.init(frame: frameRect)
 
+        // The pop-up is sized by its own constraints, so it has to be
+        // managed by Auto Layout: a view that is not has a frame of its own,
+        // and a frame of its own is a frame of zero.
+        translatesAutoresizingMaskIntoConstraints = false
         wantsLayer = true
-        layer?.cornerRadius = 12
+        layer?.cornerRadius = ReaderStyle.radius
 
-        // The term is the headline: a serif face, the way the deck set it.
-        titleLabel.font = NSFont(name: "New York", size: 16)
-            ?? NSFont(name: "Georgia", size: 16)
-            ?? NSFont.systemFont(ofSize: 16, weight: .semibold)
+        // The term is the headline. The system face, like the rest of the
+        // suite: one type voice across every panel.
+        titleLabel.font = NSFont.systemFont(ofSize: 16, weight: .semibold)
         titleLabel.textColor = .labelColor
         titleLabel.lineBreakMode = .byWordWrapping
         titleLabel.maximumNumberOfLines = 3
@@ -311,10 +319,18 @@ final class ReaderTermPopUpView: NSView {
         titleLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14).isActive = true
         titleLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14).isActive = true
         titleLabel.topAnchor.constraint(equalTo: topAnchor, constant: 13).isActive = true
+        // A label whose text wraps has no height of its own, so its height
+        // is worked out from the text and the width the pop-up is given.
+        let title = titleLabel.heightAnchor.constraint(equalToConstant: 0)
+        title.isActive = true
+        titleHeight = title
 
         definitionLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14).isActive = true
         definitionLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14).isActive = true
         definitionLabel.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 7).isActive = true
+        let definition = definitionLabel.heightAnchor.constraint(equalToConstant: 0)
+        definition.isActive = true
+        definitionHeight = definition
 
         stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8).isActive = true
         stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8).isActive = true
@@ -361,6 +377,14 @@ final class ReaderTermPopUpView: NSView {
         titleLabel.stringValue = term
         definitionLabel.stringValue = definition
         definitionLabel.isHidden = definition.isEmpty
+
+        // The heights are worked out from the text, at the width the pop-up
+        // is given.
+        let inner = Self.width - 28
+        titleHeight?.constant = ceil(titleLabel.sizeThatFits(
+            NSSize(width: inner, height: CGFloat.greatestFiniteMagnitude)).height)
+        definitionHeight?.constant = definition.isEmpty ? 0 : ceil(definitionLabel.sizeThatFits(
+            NSSize(width: inner, height: CGFloat.greatestFiniteMagnitude)).height)
 
         for view in stack.arrangedSubviews {
             stack.removeArrangedSubview(view)
@@ -489,6 +513,8 @@ final class ReaderTermChipView: NSView {
     var onHover: ((ReaderTermChipView, NSRect) -> Void)?
     /// The pointer went out.
     var onLeave: (() -> Void)?
+    /// The chip was clicked.
+    var onClick: ((String) -> Void)?
 
     /// The full term.
     let term: String
@@ -520,11 +546,13 @@ final class ReaderTermChipView: NSView {
         label.font = .systemFont(ofSize: 11, weight: .semibold)
         label.textColor = colour
         label.stringValue = self.word
+        // The label is placed by hand rather than by Auto Layout: a chip is
+        // sometimes put in a stack and sometimes given a frame directly, and
+        // a chip whose label is laid out by Auto Layout comes out empty when
+        // the chip itself is not.
+        label.translatesAutoresizingMaskIntoConstraints = true
 
         addSubview(label)
-        label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 7).isActive = true
-        label.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -7).isActive = true
-        label.centerYAnchor.constraint(equalTo: centerYAnchor).isActive = true
 
         addTrackingArea(NSTrackingArea(rect: bounds,
                                        options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect],
@@ -535,6 +563,15 @@ final class ReaderTermChipView: NSView {
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override func layout() {
+        super.layout()
+        let size = label.intrinsicContentSize
+        label.frame = NSRect(x: 7,
+                             y: (bounds.height - size.height) / 2,
+                             width: max(0, bounds.width - 14),
+                             height: size.height)
+    }
 
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
@@ -555,6 +592,12 @@ final class ReaderTermChipView: NSView {
         isHovering = false
         NSCursor.arrow.set()
         onLeave?()
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        // A chip in the rail is a way into the book, so a click on it means
+        // something: take the reader to the term.
+        onClick?(term)
     }
 
     private func updateAppearance() {

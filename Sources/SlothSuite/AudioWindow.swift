@@ -222,12 +222,12 @@ final class AudioWindowController {
         termChips = []
         termPopUp.dismiss()
 
-        var cards: [(card: NSView, number: NSTextField, playButton: NSButton)] = []
+        var cards: [(card: ReaderCardView, playButton: NSButton)] = []
         for (index, chapter) in briefing.chapters.enumerated() {
             // The card goes into the stack first: a constraint between the
             // card and the stack has no common ancestor until the card is
             // actually in it.
-            let card = NSView()
+            let card = ReaderCardView()
             chapterStack.addArrangedSubview(card)
             let parts = configureCard(card, chapter: chapter, index: index)
             cards.append(parts)
@@ -240,7 +240,7 @@ final class AudioWindowController {
     /// A layer's background colour is resolved when it is set, so a card
     /// built in the light appearance keeps its white background after the
     /// user switches to dark — and the white title with it.
-    private var chapterCards: [(card: NSView, number: NSTextField, playButton: NSButton)] = []
+    private var chapterCards: [(card: ReaderCardView, playButton: NSButton)] = []
 
     /// Re-apply every colour that was resolved when the window was built.
     ///
@@ -251,10 +251,7 @@ final class AudioWindowController {
         window?.contentView?.layer?.backgroundColor =
             window?.contentView?.resolvedCGColor(NSColor.windowBackgroundColor)
         for entry in chapterCards {
-            entry.card.layer?.backgroundColor = entry.card.resolvedCGColor(NSColor.controlBackgroundColor)
-            entry.card.layer?.borderColor = entry.card.resolvedCGColor(NSColor.separatorColor)
-            entry.number.layer?.backgroundColor =
-                entry.number.resolvedCGColor(Palette.wash(Palette.accent, amount: 0.16))
+            entry.card.needsDisplay = true
             entry.playButton.contentTintColor = Palette.accent
             entry.playButton.setColoredTitle("Play", color: Palette.accent,
                                              font: Typography.body(weight: .medium))
@@ -265,23 +262,19 @@ final class AudioWindowController {
     }
 
     @discardableResult
-    private func configureCard(_ card: NSView,
+    private func configureCard(_ card: ReaderCardView,
                                chapter: BriefingChapter,
-                               index: Int) -> (card: NSView, number: NSTextField, playButton: NSButton) {
-        card.wantsLayer = true
-        card.layer?.cornerRadius = 12
-        card.layer?.backgroundColor = card.resolvedCGColor(NSColor.controlBackgroundColor)
-        card.layer?.borderWidth = 1
-        card.layer?.borderColor = card.resolvedCGColor(NSColor.separatorColor)
+                               index: Int) -> (card: ReaderCardView, playButton: NSButton) {
+        // The card is drawn in the suite's one card language, so the reader,
+        // the chapters window and the pop-up look like the same program
+        // rather than like three programs that share a window.
+        card.accent = Palette.accent
+        card.fillAmount = 0.04
+        card.lineAmount = 0.20
         card.translatesAutoresizingMaskIntoConstraints = false
 
-        let number = NSTextField(labelWithString: "\(index + 1)")
-        number.font = Typography.caption(weight: .bold)
-        number.textColor = Palette.accent
-        number.alignment = .center
-        number.wantsLayer = true
-        number.layer?.cornerRadius = 9
-        number.layer?.backgroundColor = number.resolvedCGColor(Palette.wash(Palette.accent, amount: 0.16))
+        // The same numbered circle the reader puts in front of a takeaway.
+        let number = ReaderNumberBadge(number: index + 1, colour: Palette.accent)
         number.translatesAutoresizingMaskIntoConstraints = false
 
         // The chapter's name in full. A chapter called "The Labours of Men
@@ -400,7 +393,7 @@ final class AudioWindowController {
         // to wrap in instead of being squeezed to nothing.
         card.widthAnchor.constraint(equalTo: chapterStack.widthAnchor).isActive = true
 
-        return (card, number, playButton)
+        return (card, playButton)
     }
 
     // MARK: - The term pop-up

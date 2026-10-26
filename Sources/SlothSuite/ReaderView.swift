@@ -22,13 +22,15 @@ final class ReaderView: NSView {
     var onOpenInApp: ((Briefing) -> Void)?
     /// Export this briefing.
     var onExport: ((Briefing) -> Void)?
+    /// The user wants the reader in a window of its own.
+    var onPopOut: (() -> Void)?
     /// The user scrolled to a different chapter — used to remember where they were.
     var onChapterChanged: ((Int) -> Void)?
 
     /// Called with the chapter and how far down it the reader is.
     ///
     /// Reported when the scrolling settles, not on every pixel.
-    var onPositionChanged: ((Int, Double) -> Void)?
+    var onPositionChanged: ((String?, Int, Double) -> Void)?
 
     /// The pending position report, if a newer one has replaced it.
     private var positionWork: DispatchWorkItem?
@@ -42,9 +44,20 @@ final class ReaderView: NSView {
     private let chipStack = NSStackView()
     private var listenButton: NSButton?
     private var playAllButton: NSButton?
+    private var popOutButton: NSButton?
+
+    /// Whether this reader is the one in the pop-out window.
+    ///
+    /// The pop-out does not need a button to pop itself out.
+    var isPopOut = false {
+        didSet { popOutButton?.isHidden = isPopOut }
+    }
 
     /// The band's numbers and word cloud, at the top of the reader.
     private let overviewView = ReaderOverviewView()
+
+    /// The rail beside the text: the deck's three pillars, made live.
+    private let pillarsView = ReaderPillarsView()
 
     private let chapterScroll = NSScrollView()
     private let chapterStack = NSStackView()
@@ -186,12 +199,19 @@ final class ReaderView: NSView {
         let chapters = actionButton("Chapters", symbol: "list.bullet.rectangle", action: #selector(chaptersPressed))
         chapters.contentTintColor = Palette.accent
         chapters.setColoredTitle("Chapters", color: Palette.accent, font: Typography.body(weight: .medium))
+        // The reader in a window of its own: a long chapter, a wide measure,
+        // a second screen.
+        let popOut = actionButton("Pop out", symbol: "macwindow.badge.plus", action: #selector(popOutPressed))
+        popOut.contentTintColor = Palette.blue
+        popOut.setColoredTitle("Pop out", color: Palette.blue, font: Typography.body(weight: .medium))
+        popOutButton = popOut
         let note = actionButton("Add Note", symbol: "note.text.badge.plus", action: #selector(addNotePressed))
         let open = actionButton("Open in App", symbol: "safari", action: #selector(openInAppPressed))
         let export = actionButton("Export", symbol: "square.and.arrow.up", action: #selector(exportPressed))
         actionStack.addArrangedSubview(listen)
         actionStack.addArrangedSubview(playAll)
         actionStack.addArrangedSubview(chapters)
+        actionStack.addArrangedSubview(popOut)
         actionStack.addArrangedSubview(note)
         actionStack.addArrangedSubview(open)
         actionStack.addArrangedSubview(export)
@@ -341,6 +361,7 @@ final class ReaderView: NSView {
         addSubview(overviewView)
         addSubview(chapterScroll)
         addSubview(bodyScroll)
+        addSubview(pillarsView)
         addSubview(overlay)
 
         headerView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 28).isActive = true
@@ -357,10 +378,17 @@ final class ReaderView: NSView {
         chapterBarHeight = chapterScroll.heightAnchor.constraint(equalToConstant: 26)
         chapterBarHeight?.isActive = true
 
-        bodyScroll.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 28).isActive = true
-        bodyScroll.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -28).isActive = true
-        bodyScroll.topAnchor.constraint(equalTo: chapterScroll.bottomAnchor, constant: 6).isActive = true
-        bodyScroll.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -20).isActive = true
+        // The body is laid out by hand.
+        //
+        // The reading column and the rail share the width, and how much
+        // each of them gets depends on how wide the window is. Auto Layout
+        // cannot decide that on its own without being told, and a text
+        // column squeezed to make room for a rail is worse than no rail at
+        // all — so the split is worked out in `layoutBodyArea`.
+        bodyScroll.translatesAutoresizingMaskIntoConstraints = true
+        bodyScroll.autoresizingMask = []
+        pillarsView.translatesAutoresizingMaskIntoConstraints = true
+        pillarsView.autoresizingMask = []
 
         overlay.leadingAnchor.constraint(equalTo: leadingAnchor).isActive = true
         overlay.trailingAnchor.constraint(equalTo: trailingAnchor).isActive = true
@@ -413,7 +441,15 @@ final class ReaderView: NSView {
 
         currentChapter = 0
         lastReportedChapter = 0
+        documentId = briefing.documentId
+        // A place in the book that was open a moment ago is not a place in
+        // this one: the report that was about to be made belongs to the old
+        // book, and the reader's own place in the new one has not happened
+        // yet.
+        positionWork?.cancel()
+        lastReportedPosition = nil
         updatePillSelection()
+        updatePillars()
         bodyScroll.contentView.scroll(to: .zero)
 
         let hasChapters = !briefing.chapters.isEmpty
@@ -472,6 +508,8 @@ final class ReaderView: NSView {
         overviewView.clear()
         chapterScroll.isHidden = true
         bodyScroll.isHidden = true
+        pillarsView.isHidden = true
+        pillarsView.clear()
         chapterBarHeight?.constant = 0
     }
 
@@ -482,6 +520,21 @@ final class ReaderView: NSView {
     func focusFindBar() {
         textView.performFindPanelAction(nil)
         textView.window?.makeFirstResponder(textView)
+    }
+
+    // MARK: The rail
+
+    /// Show the rail for the chapter the reader is in.
+    ///
+    /// The rail carries the deck's three cards — the rule of three, the
+    /// glossary and the spoken recap — and each of them shows the chapter
+    /// that is on screen, so they are worth reading rather than decorative.
+    private func updatePillars() {
+        guard let briefing else {
+            pillarsView.clear()
+            return
+        }
+        pillarsView.show(briefing: briefing, chapter: currentChapter)
     }
 
     // MARK: Chips
@@ -594,7 +647,55 @@ final class ReaderView: NSView {
     override func layout() {
         super.layout()
         layoutChapterRow()
+        layoutBodyArea()
         applyPendingRestore()
+    }
+
+    /// The narrowest the reading column may be.
+    ///
+    /// Below this the column is not a column any more, and the rail goes
+    /// away rather than squeezing the text.
+    private static let minimumColumnWidth: CGFloat = 640
+
+    /// Lay out the reading column and the rail.
+    ///
+    /// The reader used to put its text in a narrow band in the middle of the
+    /// window with a third of the width empty on either side. The column now
+    /// takes the space it needs and the rail takes the rest.
+    private func layoutBodyArea() {
+        let padding: CGFloat = 28
+        let gap: CGFloat = 20
+        let available = bounds.width - padding * 2
+        guard available > 0 else { return }
+
+        let railWidth = ReaderPillarsView.width
+        let showsRail = available >= Self.minimumColumnWidth + gap + railWidth
+
+        // The chapter bar is above the body, and this view is not flipped,
+        // so the body's top edge is the chapter bar's *bottom* edge.
+        let top = chapterScroll.frame.minY - 6
+        let bottom: CGFloat = 20
+        let height = top - bottom
+        guard height > 0 else { return }
+
+        let columnWidth = showsRail ? available - gap - railWidth : available
+        let columnFrame = NSRect(x: padding, y: bottom, width: columnWidth, height: height)
+        if bodyScroll.frame != columnFrame {
+            bodyScroll.frame = columnFrame
+        }
+
+        if showsRail {
+            pillarsView.isHidden = false
+            let railFrame = NSRect(x: padding + columnWidth + gap,
+                                   y: bottom,
+                                   width: railWidth,
+                                   height: height)
+            if pillarsView.frame != railFrame {
+                pillarsView.frame = railFrame
+            }
+        } else if !pillarsView.isHidden {
+            pillarsView.isHidden = true
+        }
     }
 
     /// Put the reader back to a place that could not be applied earlier.
@@ -632,6 +733,7 @@ final class ReaderView: NSView {
             lastReportedChapter = 0
             currentChapter = 0
             updatePillSelection()
+            updatePillars()
             bodyScroll.contentView.scroll(to: .zero)
             onChapterChanged?(0)
             schedulePositionReport()
@@ -655,6 +757,7 @@ final class ReaderView: NSView {
         lastReportedChapter = index
         currentChapter = index
         updatePillSelection()
+        updatePillars()
         bodyScroll.contentView.scroll(to: NSPoint(x: 0, y: target))
         onChapterChanged?(index)
         schedulePositionReport()
@@ -689,6 +792,7 @@ final class ReaderView: NSView {
         currentChapter = index
         lastReportedChapter = index
         updatePillSelection()
+        updatePillars()
         if report { onChapterChanged?(index) }
         return true
     }
@@ -723,6 +827,7 @@ final class ReaderView: NSView {
         currentChapter = chapter
         lastReportedChapter = chapter
         updatePillSelection()
+        updatePillars()
 
         guard let manager = textView.layoutManager, let container = textView.textContainer else { return }
         manager.ensureLayout(for: container)
@@ -931,6 +1036,7 @@ final class ReaderView: NSView {
             lastReportedChapter = index
             currentChapter = index
             updatePillSelection()
+            updatePillars()
             onChapterChanged?(index)
         }
         // While the reader is on its way back to a saved place, where it
@@ -938,6 +1044,14 @@ final class ReaderView: NSView {
         if pendingRestore != nil { return }
         schedulePositionReport()
     }
+
+    /// The last place reported.
+    ///
+    /// Two readers of the same book can be told about each other's place,
+    /// and a reader that is moved by something else reports the place it was
+    /// moved to. Without this the two would go on telling each other the
+    /// same numbers for ever.
+    private var lastReportedPosition: (chapter: Int, scroll: Double)?
 
     /// Report where the reader is, once the scrolling has settled.
     ///
@@ -948,7 +1062,7 @@ final class ReaderView: NSView {
         positionWork?.cancel()
         let work = DispatchWorkItem { [weak self] in
             guard let self else { return }
-            self.onPositionChanged?(self.currentChapter, self.scrollFraction())
+            self.reportPosition()
         }
         positionWork = work
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.6, execute: work)
@@ -963,6 +1077,25 @@ final class ReaderView: NSView {
         bodyScroll.contentView.scroll(to: NSPoint(x: 0, y: visible.minY + amount))
     }
 
+    /// Say where the reader is — if it is somewhere new.
+    private func reportPosition() {
+        // A reader whose text has not been laid out yet is at the top of the
+        // book, not where the reader was, and reporting that would overwrite
+        // the place that was saved.
+        if pendingRestore != nil { return }
+        guard documentId != nil else { return }
+
+        let chapter = currentChapter
+        let scroll = scrollFraction()
+        if let last = lastReportedPosition,
+           last.chapter == chapter,
+           abs(last.scroll - scroll) < 0.002 {
+            return
+        }
+        lastReportedPosition = (chapter, scroll)
+        onPositionChanged?(documentId, chapter, scroll)
+    }
+
     /// Report the position now, without waiting for the scrolling to settle.
     ///
     /// Called when the reader is put away, so the place is saved even if the
@@ -972,17 +1105,52 @@ final class ReaderView: NSView {
         positionWork = nil
         // A place that has not been applied yet is not the reader's place.
         if pendingRestore != nil { return }
-        onPositionChanged?(currentChapter, scrollFraction())
+        reportPosition()
     }
 
     /// The chapter the reader is looking at.
     var currentChapterIndex: Int { currentChapter }
+
+    /// The briefing on show.
+    var currentBriefing: Briefing? { briefing }
+
+    /// The document the reader is showing.
+    ///
+    /// A position report carries the document it belongs to: the reader can
+    /// be in two windows at once, and a report from one of them must not be
+    /// written against whichever document the other one happens to have
+    /// open.
+    private(set) var documentId: String?
+
+    /// Move the reader to a place without saying that they got there.
+    ///
+    /// The reader can be in two windows at once — the suite and the pop-out
+    /// — and when one of them moves, the other has to follow it. The move
+    /// was not the reader's own doing, so it is not reported back.
+    func follow(to chapter: Int, scroll: Double) {
+        guard chapter > 0 else { return }
+        if !moveToChapter(chapter, fraction: scroll, report: false) {
+            pendingRestore = (chapter, scroll)
+        }
+    }
 
     /// The pop-up's own view, so it can be looked at without a pointer.
     var termPopUpViewForInspection: NSView? { termPopUp.contentViewForInspection }
 
     /// The chips and the keyword tags, for the self-test.
     var readerTermsForTest: ([ReaderChipInfo], [ReaderKeywordInfo]) { (textView.chips, textView.keywords) }
+
+    /// The width of the reading column, and of the area it sits in.
+    ///
+    /// The reader used to put its text in a narrow band in the middle of the
+    /// window with a third of the width empty on either side. These are the
+    /// numbers the self-test measures.
+    var readingWidthsForTest: (column: CGFloat, area: CGFloat) {
+        (bodyScroll.frame.width, max(0, bounds.width - 56))
+    }
+
+    /// The deck's three cards, by name.
+    var pillarTitlesForTest: [String] { pillarsView.pillarTitlesForTest }
 
     /// The briefing on show, for the self-test.
     var briefingForTest: Briefing? { briefing }
@@ -1082,6 +1250,11 @@ final class ReaderView: NSView {
         onOpenChapters?(briefing)
     }
 
+    /// Put the reader in a window of its own.
+    @objc private func popOutPressed() {
+        onPopOut?()
+    }
+
     @objc private func addNotePressed() {
         guard let briefing else { return }
         onAddNote?(briefing)
@@ -1109,9 +1282,9 @@ private final class ReaderTextView: NSTextView {
 
     /// The widest the text column is allowed to get. Past this the eye
     /// starts losing the start of the next line.
-    var maximumMeasure: CGFloat = 660
+    var maximumMeasure: CGFloat = 720
     /// The breathing room around the column.
-    var margin: CGFloat = 32
+    var margin: CGFloat = 26
 
     /// The thesis block, if the briefing has one. The rule is drawn beside it.
     var ruleRange: NSRange?
@@ -1343,14 +1516,9 @@ private final class ReaderTextView: NSTextView {
                 .insetBy(dx: -13, dy: -6)
             guard rect.intersects(dirtyRect) else { continue }
 
-            let path = NSBezierPath(roundedRect: rect, xRadius: 9, yRadius: 9)
-            resolvedColour(card.kind.fill).setFill()
-            path.fill()
-
-            let border = NSBezierPath(roundedRect: rect.insetBy(dx: 0.5, dy: 0.5), xRadius: 9, yRadius: 9)
-            resolvedColour(Palette.wash(card.kind.accent, amount: 0.30)).setStroke()
-            border.lineWidth = 1
-            border.stroke()
+            drawReaderCard(rect,
+                           accent: card.kind.accent,
+                           fillAmount: card.kind.fillAmount)
 
             if let badge = card.badge {
                 drawBadge(badge, in: rect, card: card, manager: manager)

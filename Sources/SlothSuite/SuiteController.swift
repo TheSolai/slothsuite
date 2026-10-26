@@ -59,6 +59,12 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
     /// The document currently open in the reader.
     private var openDocumentId: String?
 
+    /// Set while one reader is being moved because the other one moved.
+    ///
+    /// The reader can be in two windows at once, and a move in one of them
+    /// moves the other. Without this the two would chase each other.
+    private var isMovingReaders = false
+
     /// The chapter the reader should open at, when one was asked for.
     private var openChapter: Int?
 
@@ -290,6 +296,22 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
                 window.setContentSize(size)
             }
 
+            // The reader in its own window is a pop-out too, so it needs the
+            // reader to have a briefing before it can be shown.
+            if request.module == "popout" {
+                self.showModule("reader")
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+                    self.togglePopOut()
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                        self.toggleAppearanceIfAsked()
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                            self.captureWindow(to: request.path, in: .popout)
+                        }
+                    }
+                }
+                return
+            }
+
             // The audio window is a pop-out, so it needs the reader to have a
             // briefing before it can be shown.
             if request.module == "audio" {
@@ -365,6 +387,7 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
         case main
         case audio
         case term
+        case popout
     }
 
     private func openAudioWindowForInspection() {
@@ -389,6 +412,8 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
             view = AudioWindowController.shared.contentViewForInspection
         case .term:
             view = readerView.termPopUpViewForInspection
+        case .popout:
+            view = ReaderWindowController.shared.windowForInspection?.contentView
         }
         guard let view else {
             // A snapshot that cannot find its window must still stop. Leaving
@@ -554,37 +579,44 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
         // The native reader.
         readerView = ReaderView()
         readerView.translatesAutoresizingMaskIntoConstraints = false
-        readerView.onSpeakChapter = { [weak self] chapter in
+        wire(readerView)
+
+        // The reader in the pop-out window is the same reader with the same
+        // buttons and the same memory of where the reader was.
+        ReaderWindowController.shared.onSpeakChapter = { [weak self] chapter in
             self?.speakText(chapter.spokenText, title: chapter.title)
         }
-        readerView.onSpeakAll = { [weak self] briefing in
+        ReaderWindowController.shared.onSpeakAll = { [weak self] briefing in
             self?.speakEverything(briefing)
         }
-        readerView.onOpenChapters = { briefing in
+        ReaderWindowController.shared.onOpenChapters = { briefing in
             AudioWindowController.shared.show(briefing: briefing)
         }
-        readerView.onAddNote = { [weak self] briefing in
+        ReaderWindowController.shared.onAddNote = { [weak self] briefing in
             guard let self else { return }
             self.startNote(forDocumentId: briefing.documentId,
                            title: briefing.title,
                            chapter: self.readerView.currentChapterIndex)
         }
-        readerView.onOpenInApp = { [weak self] briefing in
+        ReaderWindowController.shared.onOpenInApp = { [weak self] briefing in
             self?.openInApp(documentId: briefing.documentId)
         }
-        readerView.onExport = { [weak self] briefing in
+        ReaderWindowController.shared.onExport = { [weak self] _ in
             self?.performExport(document: nil)
         }
-        readerView.onChapterChanged = { [weak self] chapter in
-            guard let self, let id = self.openDocumentId else { return }
-            LearningStore.shared.markReading(documentId: id, chapter: chapter)
+        ReaderWindowController.shared.onChapterChanged = { [weak self] chapter in
+            self?.readerChangedChapter(chapter)
         }
-        readerView.onPositionChanged = { [weak self] chapter, scroll in
-            guard let self, let id = self.openDocumentId else { return }
+        ReaderWindowController.shared.onPositionChanged = { [weak self] document, chapter, scroll in
+            guard let self else { return }
             // The place is written to disk but not announced: it changes on
             // every scroll, and telling the whole interface about it would
             // redraw the library and the notes for nothing.
-            LearningStore.shared.setPosition(documentId: id, chapter: chapter, scroll: scroll)
+            self.savePosition(documentId: document, chapter: chapter, scroll: scroll)
+            guard !self.isMovingReaders else { return }
+            self.isMovingReaders = true
+            self.readerView.follow(to: chapter, scroll: scroll)
+            self.isMovingReaders = false
         }
 
         // The native notes module.
@@ -999,6 +1031,82 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
         guard let id = openDocumentId,
               let document = LibraryStore.shared.document(id: id) else { return "Nothing open" }
         return document.title
+    }
+
+    // MARK: - The reader's buttons
+
+    /// Give a reader the suite's buttons and the suite's memory.
+    ///
+    /// The reader in the pop-out window is the same reader as the one in the
+    /// suite, so it is given the same handlers rather than a set of its own.
+    private func wire(_ reader: ReaderView) {
+        reader.onSpeakChapter = { [weak self] chapter in
+            self?.speakText(chapter.spokenText, title: chapter.title)
+        }
+        reader.onSpeakAll = { [weak self] briefing in
+            self?.speakEverything(briefing)
+        }
+        reader.onOpenChapters = { briefing in
+            AudioWindowController.shared.show(briefing: briefing)
+        }
+        reader.onAddNote = { [weak self] briefing in
+            guard let self else { return }
+            self.startNote(forDocumentId: briefing.documentId,
+                           title: briefing.title,
+                           chapter: reader.currentChapterIndex)
+        }
+        reader.onOpenInApp = { [weak self] briefing in
+            self?.openInApp(documentId: briefing.documentId)
+        }
+        reader.onExport = { [weak self] _ in
+            self?.performExport(document: nil)
+        }
+        reader.onChapterChanged = { [weak self] chapter in
+            self?.readerChangedChapter(chapter)
+        }
+        reader.onPositionChanged = { [weak self] document, chapter, scroll in
+            guard let self else { return }
+            self.savePosition(documentId: document, chapter: chapter, scroll: scroll)
+            guard !self.isMovingReaders else { return }
+            self.isMovingReaders = true
+            ReaderWindowController.shared.follow(to: chapter, scroll: scroll)
+            self.isMovingReaders = false
+        }
+        reader.onPopOut = { [weak self] in
+            self?.togglePopOut()
+        }
+    }
+
+    /// Remember which chapter the reader is in.
+    private func readerChangedChapter(_ chapter: Int) {
+        guard let id = openDocumentId else { return }
+        LearningStore.shared.markReading(documentId: id, chapter: chapter)
+    }
+
+    /// Remember where the reader is.
+    ///
+    /// The document comes with the report. A reader in the pop-out window
+    /// can be showing a different book from the one in the suite, and the
+    /// place belongs to the book it was read in.
+    private func savePosition(documentId: String?, chapter: Int, scroll: Double) {
+        guard let id = documentId ?? openDocumentId else { return }
+        LearningStore.shared.setPosition(documentId: id, chapter: chapter, scroll: scroll)
+    }
+
+    /// Put the reader in a window of its own, or bring it back again.
+    ///
+    /// The two readers are two windows onto one book, so they are kept in
+    /// step: whichever one the reader is using, the other follows.
+    private func togglePopOut() {
+        guard let briefing = readerView.currentBriefing else { return }
+
+        if ReaderWindowController.shared.isOpen {
+            ReaderWindowController.shared.close()
+            return
+        }
+
+        let position = openDocumentId.flatMap { LearningStore.shared.position(for: $0) }
+        ReaderWindowController.shared.show(briefing: briefing, position: position)
     }
 
     // MARK: - Menu
@@ -2137,6 +2245,12 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
 
     /// Trigger the reader's own file picker (used by the self-test).
     func triggerAddBookForTest() { triggerAddBook() }
+
+    /// Put the reader in a window of its own, for the self-test.
+    func togglePopOutForTest() { togglePopOut() }
+
+    /// Is the reader's own window open?
+    var popOutIsOpenForTest: Bool { ReaderWindowController.shared.isOpen }
 
     /// Evaluate JavaScript in the active page, reporting back on the main thread.
     func evaluateAsyncForTest(_ script: String, completion: @escaping (Any?) -> Void) {

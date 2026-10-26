@@ -44,9 +44,6 @@ final class ReaderOverviewView: NSView {
 
         super.init(frame: frameRect)
 
-        wantsLayer = true
-        layer?.cornerRadius = 10
-
         statsStack.orientation = .horizontal
         statsStack.alignment = .top
         statsStack.distribution = .fill
@@ -94,11 +91,16 @@ final class ReaderOverviewView: NSView {
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
-    override func viewDidChangeEffectiveAppearance() {
-        super.viewDidChangeEffectiveAppearance()
-        layer?.backgroundColor = resolvedCGColor(NSColor.controlBackgroundColor)
-        layer?.borderColor = resolvedCGColor(NSColor.separatorColor)
-        layer?.borderWidth = 1
+    /// The band is a card, drawn in the suite's one card language.
+    ///
+    /// It used to be a white panel on a white window, which is a panel you
+    /// cannot see; the band carries the numbers that describe the book, so
+    /// it has to look like something.
+    override func draw(_ dirtyRect: NSRect) {
+        drawReaderCard(bounds,
+                       accent: Palette.accent,
+                       fillAmount: 0.04,
+                       lineAmount: 0.20)
     }
 
     /// Fill the band in.
