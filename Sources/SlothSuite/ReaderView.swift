@@ -39,6 +39,8 @@ final class ReaderView: NSView {
     var onExport: ((Briefing) -> Void)?
     /// The user wants the reader in a window of its own.
     var onPopOut: (() -> Void)?
+    /// The user wants the voice to stop.
+    var onStopAudio: (() -> Void)?
     /// The user scrolled to a different chapter — used to remember where they were.
     var onChapterChanged: ((Int) -> Void)?
 
@@ -65,6 +67,7 @@ final class ReaderView: NSView {
     private let chipStack = NSStackView()
     private var listenButton: NSButton?
     private var playAllButton: NSButton?
+    private var stopButton: NSButton?
     private var popOutButton: NSButton?
 
     /// Whether this reader is the one in the pop-out window.
@@ -143,6 +146,13 @@ final class ReaderView: NSView {
         super.init(frame: .zero)
         translatesAutoresizingMaskIntoConstraints = false
 
+        // The voice has to be stoppable, and the button that stops it has to
+        // know when there is something to stop.
+        NotificationCenter.default.addObserver(self,
+                                               selector: #selector(audioStateChanged),
+                                               name: AudioPlayer.stateChanged,
+                                               object: nil)
+
         buildHeader()
         buildChapterBar()
         buildBody()
@@ -164,6 +174,9 @@ final class ReaderView: NSView {
         textView.onPointerLeft = { [weak self] in
             self?.termPopUp.scheduleHide()
         }
+
+        // The voice can be stopped from the rail as well as from the header.
+        pillarsView.onStopAudio = { [weak self] in self?.onStopAudio?() }
 
         // A word in the cloud is a way into the book: it goes to the first
         // chapter that uses the word and flashes it there.
@@ -217,6 +230,13 @@ final class ReaderView: NSView {
         playAllButton = playAll
         playAll.contentTintColor = Palette.accent
         playAll.setColoredTitle("All audio", color: Palette.accent, font: Typography.body(weight: .medium))
+        // The way to stop the voice. It sits with the buttons that start it
+        // and is greyed out when the suite is quiet, so the header never
+        // moves and the way to stop is always in the same place.
+        let stop = actionButton("Stop", symbol: "stop.fill", action: #selector(stopAudioPressed))
+        stop.contentTintColor = Palette.rose
+        stop.setColoredTitle("Stop", color: Palette.rose, font: Typography.body(weight: .medium))
+        stopButton = stop
         let chapters = actionButton("Chapters", symbol: "list.bullet.rectangle", action: #selector(chaptersPressed))
         chapters.contentTintColor = Palette.accent
         chapters.setColoredTitle("Chapters", color: Palette.accent, font: Typography.body(weight: .medium))
@@ -231,6 +251,7 @@ final class ReaderView: NSView {
         let export = actionButton("Export", symbol: "square.and.arrow.up", action: #selector(exportPressed))
         actionStack.addArrangedSubview(listen)
         actionStack.addArrangedSubview(playAll)
+        actionStack.addArrangedSubview(stop)
         actionStack.addArrangedSubview(chapters)
         actionStack.addArrangedSubview(popOut)
         actionStack.addArrangedSubview(note)
@@ -269,6 +290,8 @@ final class ReaderView: NSView {
         chipStack.heightAnchor.constraint(equalToConstant: 19).isActive = true
         chipStackWidth = chipStack.widthAnchor.constraint(equalToConstant: 0)
         chipStackWidth?.isActive = true
+
+        updateAudioState()
     }
 
     private func actionButton(_ title: String, symbol: String, action: Selector) -> NSButton {
@@ -1213,6 +1236,12 @@ final class ReaderView: NSView {
     /// Whether the reader is at the front of the book.
     var isAtTheFrontForTest: Bool { currentChapter == 0 }
 
+    /// Whether the stop button is live, for the self-test.
+    var audioStopEnabledForTest: Bool { stopButton?.isEnabled ?? false }
+
+    /// Press the stop button, for the self-test.
+    func pressAudioStopForTest() { stopAudioPressed() }
+
     /// Follow a keyword, the way clicking its tag does.
     ///
     /// Returns the chapter the reader landed on, and whether the term was
@@ -1269,6 +1298,28 @@ final class ReaderView: NSView {
     }
 
     // MARK: - Actions
+
+    /// Show whether anything is being read aloud.
+    ///
+    /// The stop is greyed out when the suite is quiet and live when it is
+    /// not, so the reader can see at a glance that the voice is running.
+    private func updateAudioState() {
+        let speaking = AudioPlayer.shared.isActive
+        stopButton?.isEnabled = speaking
+        stopButton?.contentTintColor = speaking ? Palette.rose : .tertiaryLabelColor
+        stopButton?.setColoredTitle("Stop",
+                                    color: speaking ? Palette.rose : .tertiaryLabelColor,
+                                    font: Typography.body(weight: .medium))
+    }
+
+    @objc private func audioStateChanged() {
+        updateAudioState()
+    }
+
+    /// Stop the voice.
+    @objc private func stopAudioPressed() {
+        onStopAudio?()
+    }
 
     @objc private func listenPressed() {
         let menu = NSMenu()

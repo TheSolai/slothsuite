@@ -622,6 +622,119 @@ while a load is running are now kept, and answered.
 
 All five are in the gate.
 
+## Phase 12 — a stop for the voice
+
+*"Need a stop button for audio."*
+
+The suite could read a book aloud and could not stop it. The only way to
+silence the voice was to open the chapters window, which has had a **Stop**
+button since Phase 4 — the button was in the one window nobody had open.
+
+### Where the stop lives
+
+A stop wherever the voice can be started:
+
+- a **Stop** button in the reader's header, next to the buttons that start
+  it. It is greyed out when the suite is quiet and live the moment the voice
+  starts, so the header never moves and the way to stop is always in the
+  same place.
+- the **sound card** in the reader's rail, whose play button becomes a stop
+  button while anything is being read. The card is the one piece of the
+  reader that is always about the voice, so the way to stop it belongs there.
+- **Stop Audio** in the File menu, on **⌘.**, which works from anywhere: the
+  library can start a summary talking, and the notes are where you are when
+  you change your mind about it.
+
+The stop is live the moment the speech is *asked for*, not when the audio
+starts playing. The Mac takes a second or two to make a chapter, and a
+chapter that is being made can be called off.
+
+### The state belongs to the player
+
+The audio player now says what it is doing — idle, speaking, or queued at
+item three of thirty-seven — and says it in one place that everybody can
+hear. It is a notification rather than a callback, because there can be a
+reader in the suite and a reader in the pop-out window, and both have to
+know.
+
+The dock badge follows it. The badge said the suite was speaking, and it
+stayed saying so after the voice had stopped, because nothing was watching
+the player finish. A badge that says the suite is speaking when it is not
+is worse than no badge at all.
+
+### The voice lives on the main thread
+
+The player hears a chapter finish on **its own audio thread**, and the state
+it keeps — what is playing, which chapter is next — was being changed from
+there while the interface read it from the main thread. The notification that
+announces the change went out from that thread too, so the handlers that
+light the stop button were running where AppKit says buttons may not be
+touched.
+
+Both the state and the announcement now cross to the main thread first. It
+is the same rule the learning store already follows, and it is the rule that
+matters: an interface is only touched from the thread that owns it.
+
+The suite's observers are also **held** now. A block observer hands back a
+token, and that token is the only way to take the observer off again —
+dropping it leaves the observer registered forever with nothing that can
+remove it.
+
+### A book that is not ready
+
+**Send to Notes** made an empty note for a book whose synthesis had not
+finished: the note was created, it said nothing, and the menu item looked
+like it had worked. It now says the briefing is not ready yet, and the gate
+checks the note that a ready book makes.
+
+### How it is checked
+
+- `audio.stop` checks that the stop is greyed out when nothing is playing.
+- `audio.stop.live` starts the voice and checks the stop comes alive.
+- `audio.stopped` presses the stop and checks the voice is quiet.
+
+All three are in the gate, and they use the Mac's own voice rather than a
+mock, so they prove the whole path: the synthesis, the player, the button
+and the state.
+
+### The gate had been leaving the reader's books changed
+
+Building this phase turned up a fault in the gate itself, which had been
+quietly damaging the reader's own data.
+
+The self-test takes the whole learning store — notes, places, favourites,
+read state, the "continue reading" pointer — and puts it back at the end,
+so a test run leaves the reader's books exactly as it found them. The
+put-back was **asynchronous**: the store writes on its own queue, because a
+keystroke should not wait for the disk, and the test called `exit` the
+moment it had asked for the restore. That is a race, and it lost about one
+time in four. When it lost, the reader came back to a stray empty note and
+a reading place the test had moved.
+
+The put-back now uses `saveNow` — the version for a process that is on its
+way out — so the file is complete before the process leaves.
+
+### Known issue — an intermittent crash in the gate
+
+The gate crashed once on 27 October 2026 and has not been caught since,
+across six further runs (twice under the debugger, once under
+AddressSanitizer, three times normally).
+
+The signature is an `EXC_BAD_ACCESS` — a retain of an object that is no
+longer there — inside `SuiteController.updateWindowTitle()`, reached from
+`showModule()` and from the learning store's change handler. The crash was
+inside the `mac.chat` check's aftermath: that check blocks the main thread
+for about a minute and a half, and the crash came in the burst of queued
+work that followed.
+
+What has been ruled out: it is not the Phase 11 or Phase 12 code — the two
+functions it lands in are from Phase 4 and have not been touched since;
+AddressSanitizer reports no use-after-free; and the suite contains no
+`Unmanaged`, `unsafeBitCast` or manual memory handling.
+
+It is worth finding. It is recorded here so that it is not forgotten, and
+so that whoever finds it first knows what it looks like.
+
 ## Phase 7 — the fourth ten: a learning desk that remembers
 
 *"Now make 10 QoL improvements."* Every one of these was a gap found by
@@ -810,7 +923,7 @@ Building the gate found four real defects that had been invisible:
 
 ## Verified
 
-The gate (`./build.sh test`) is green at **60/60**, exit 0:
+The gate (`./build.sh test`) is green at **63/63**, exit 0:
 
 ```
 config.apps, config.services, stack.script, stack.ports.read,
@@ -822,6 +935,7 @@ notes.editor, notes.autosave, notes.survive, notes.cleanup, briefing.fetch,
 briefing.shape, reader.chips, reader.keywords, reader.follows, reader.pillars,
 reader.width, reader.briefing, reader.popout, reader.opening,
 reader.keepsplace, notes.send, library.menu, library.rightclick,
+audio.stop, audio.stop.live, audio.stopped,
 web.endpoint.read, provider.endpoint, mac.service, mac.chat, mac.speak,
 selftest.fixture, filepicker.fired, upload.pipeline, reader.position,
 reader.persist, notes.chapter, notes.export, library.sort, library.bulk,
@@ -844,9 +958,15 @@ away again, so the user's own notes are never touched.
 
 The `library.menu`, `library.rightclick` and `notes.send` checks drive the
 card's menu the way a person does — both ways in — and then take the note
-they made away again. The whole learning store is snapshotted at the start
-of the run and put back at the end, so a run leaves the reader's own notes,
-places and favourites exactly as it found them.
+they made away again. The three `audio.*` checks use the Mac's own voice
+rather than a mock: they start it, wait for the stop to come alive, press it
+and wait for the voice to be quiet.
+
+The whole learning store is snapshotted at the start of the run and put
+back at the end, and the put-back is **written to the disk before the
+process exits** — a run now leaves the reader's own notes, places and
+favourites byte for byte as it found them, which it did not always do
+before.
 
 The gate cleans up after itself: the document it uploads is deleted again
 before the run ends, so a gate that runs on every build does not leave a

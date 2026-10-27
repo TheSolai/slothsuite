@@ -70,6 +70,16 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
     /// Pins the content view to the window's content area.
     private var contentSizeConstraints: (width: NSLayoutConstraint, height: NSLayoutConstraint)?
 
+    /// The observers the suite keeps.
+    ///
+    /// A block observer hands back a token that is its only way to be
+    /// removed. Dropping the token does not stop the observer being
+    /// called — it leaves it registered forever, with nothing left that
+    /// can take it off again. Holding the token means the observer can be
+    /// taken off when the suite goes away.
+    private var resizeObserver: NSObjectProtocol?
+    private var audioObserver: NSObjectProtocol?
+
     private var webViews: [String: WKWebView] = [:]
     private var bridges: [String: Bridge] = [:]
     private var loaded: Set<String> = []
@@ -369,6 +379,12 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
         case "newnote":
             notesView.pressNewNoteForTest()
             Log.shared.write("snapshot action — pressed New Note")
+        case "audiospeaking":
+            // The voice is started on purpose, so the capture shows the stop
+            // button while the suite is speaking.
+            AudioPlayer.shared.speak("This is the Mac's own voice reading a sentence, so that the stop button can be seen in the capture.",
+                                     label: "Test")
+            Log.shared.write("snapshot action — started the voice")
         case "readerlower":
             // The reader puts itself back where it was when the briefing
             // arrives, which can be after this action runs. So the scroll
@@ -591,6 +607,9 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
         ReaderWindowController.shared.onSpeakAll = { [weak self] briefing in
             self?.speakEverything(briefing)
         }
+        ReaderWindowController.shared.onStopAudio = {
+            AudioPlayer.shared.stop()
+        }
         ReaderWindowController.shared.onOpenChapters = { briefing in
             AudioWindowController.shared.show(briefing: briefing)
         }
@@ -788,7 +807,7 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
         contentSizeConstraints = (pinnedWidth, pinnedHeight)
 
         // Keep the pin in step with the window when the user resizes it.
-        NotificationCenter.default.addObserver(
+        resizeObserver = NotificationCenter.default.addObserver(
             forName: NSWindow.didResizeNotification,
             object: window,
             queue: .main
@@ -797,6 +816,16 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
             let content = window.contentRect(forFrameRect: window.frame).size
             self.contentSizeConstraints?.width.constant = content.width
             self.contentSizeConstraints?.height.constant = content.height
+        }
+
+        // The badge follows the voice: it says the suite is speaking while
+        // it is, and it goes when it stops.
+        audioObserver = NotificationCenter.default.addObserver(
+            forName: AudioPlayer.stateChanged,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.updateDockBadge()
         }
 
         sidebar.leadingAnchor.constraint(equalTo: root.leadingAnchor).isActive = true
@@ -1051,6 +1080,9 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
         reader.onSpeakAll = { [weak self] briefing in
             self?.speakEverything(briefing)
         }
+        reader.onStopAudio = {
+            AudioPlayer.shared.stop()
+        }
         reader.onOpenChapters = { briefing in
             AudioWindowController.shared.show(briefing: briefing)
         }
@@ -1151,6 +1183,7 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
         fileMenu.addItem(withTitle: "Export Notes…", action: #selector(exportNotes), keyEquivalent: "E")
         fileMenu.addItem(.separator())
         fileMenu.addItem(withTitle: "All Audio…", action: #selector(speakOpenDocument), keyEquivalent: "s")
+        fileMenu.addItem(withTitle: "Stop Audio", action: #selector(stopAudio), keyEquivalent: ".")
         fileMenu.addItem(withTitle: "Audio and Chapters…", action: #selector(openAudioWindow), keyEquivalent: "")
         fileMenuItem.submenu = fileMenu
         mainMenu.addItem(fileMenuItem)
@@ -1539,7 +1572,7 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
             switch result {
             case .success(let folder):
                 NSWorkspace.shared.open(folder)
-                self?.setDockBadge(nil)
+                self?.updateDockBadge()
             case .failure(let error):
                 self?.presentError(title: "Export failed", message: error.localizedDescription)
             }
@@ -1569,7 +1602,6 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
             }
 
             DispatchQueue.main.async {
-                self.setDockBadge("🔊")
                 AudioPlayer.shared.speak(trimmed, label: title)
             }
         }
@@ -1587,7 +1619,6 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
             return
         }
 
-        setDockBadge("🔊")
         AudioPlayer.shared.speakAll(texts, labels: labels)
     }
 
@@ -1654,7 +1685,6 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
                         // The queue plays the chapters one after another
                         // rather than reading them all at once.
                         let labels = script.enumerated().map { "Chapter \($0.offset + 1)" }
-                        self.setDockBadge("🔊")
                         AudioPlayer.shared.speakAll(script, labels: labels)
                     }
                 }.resume()
@@ -1845,15 +1875,25 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
                                          + "It appears as soon as the synthesis finishes.")
                 return
             }
-            self.makeNote(from: briefing, for: document)
+            // A book whose synthesis has not finished has nothing to send.
+            // An empty note is worse than no note: it looks like the book's
+            // briefing is empty.
+            let body = Self.noteBody(for: briefing)
+            guard !body.isEmpty else {
+                self.presentError(title: "Nothing to send yet",
+                                  message: "The briefing for \u{201C}\(document.title)\u{201D} is not ready yet. "
+                                         + "It appears as soon as the synthesis finishes.")
+                return
+            }
+            self.makeNote(from: body, for: document)
         }
     }
 
     /// Put a briefing into a note and open it.
-    private func makeNote(from briefing: Briefing, for document: LibraryDocument) {
+    private func makeNote(from body: String, for document: LibraryDocument) {
         let note = LearningStore.shared.addNote(documentId: document.id,
                                                 documentTitle: document.title,
-                                                body: Self.noteBody(for: briefing))
+                                                body: body)
         showModule("notes")
         notesView.show(notes: LearningStore.shared.allNotes)
         notesView.select(noteId: note.id)
@@ -1982,6 +2022,15 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
     }
 
     /// Speak whatever is open in the reader.
+    /// Stop the voice.
+    ///
+    /// The voice has to be stoppable from anywhere, not only from the reader
+    /// that started it: the library can start a summary talking, and the
+    /// notes are where you are when you change your mind about it.
+    @objc private func stopAudio() {
+        AudioPlayer.shared.stop()
+    }
+
     @objc private func speakOpenDocument() {
         guard let id = openDocumentId,
               let briefing = BriefingStore.shared.briefing(documentId: id) else {
@@ -2073,9 +2122,14 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
             NSPasteboard.general.setString(text, forType: .string)
             Log.shared.write("diagnostics copied to the clipboard")
             DispatchQueue.main.async {
-                self.setDockBadge("📋")
+                // The voice owns the badge first. If the suite is speaking,
+                // the diagnostics marker must not take the dock away from
+                // it — the badge is a promise about what the suite is doing.
+                if !AudioPlayer.shared.isActive {
+                    self.setDockBadge("📋")
+                }
                 DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
-                    self.setDockBadge(nil)
+                    self.updateDockBadge()
                 }
             }
         }
@@ -2210,6 +2264,7 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
             ("⌘O", "Add a document"),
             ("⌘E", "Export as separate files"),
             ("⌘S", "Speak the open briefing"),
+            ("⌘.", "Stop reading aloud"),
             ("⌘\\", "Show or hide the sidebar"),
             ("⌘R", "Reload the app"),
             ("⌘D", "Copy diagnostics")
@@ -2252,6 +2307,15 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
 
     private func setDockBadge(_ text: String?) {
         NSApp.dockTile.badgeLabel = text
+    }
+
+    /// The dock badge says what the suite is doing.
+    ///
+    /// The audio is the usual reason for a badge, and it has to go when the
+    /// audio stops: a badge that says the suite is speaking when it is not
+    /// is worse than no badge at all.
+    private func updateDockBadge() {
+        setDockBadge(AudioPlayer.shared.isActive ? "🔊" : nil)
     }
 
     // MARK: - Page events

@@ -74,6 +74,8 @@ final class ReaderPillarsView: NSView {
 
     /// The reader asked to hear the chapter on show.
     var onSpeakChapter: ((BriefingChapter) -> Void)?
+    /// The reader wants the voice to stop.
+    var onStopAudio: (() -> Void)?
     /// The reader clicked a takeaway and wants to be taken to it.
     var onTakeaway: ((Int) -> Void)?
     /// The reader clicked a term and wants to be taken to it.
@@ -132,6 +134,9 @@ final class ReaderPillarsView: NSView {
             card.onSpeakChapter = { [weak self] chapter in
                 self?.onSpeakChapter?(chapter)
             }
+            card.onStopAudio = { [weak self] in
+                self?.onStopAudio?()
+            }
         }
     }
 
@@ -182,6 +187,8 @@ final class ReaderPillarCard: NSView {
     var onTerm: ((String) -> Void)?
     /// The reader asked to hear the chapter.
     var onSpeakChapter: ((BriefingChapter) -> Void)?
+    /// The reader wants the voice to stop.
+    var onStopAudio: (() -> Void)?
 
     private let kicker = NSTextField(labelWithString: "")
     private let title = NSTextField(labelWithString: "")
@@ -231,6 +238,13 @@ final class ReaderPillarCard: NSView {
 
         wantsLayer = true
         translatesAutoresizingMaskIntoConstraints = false
+
+        // The sound card's button becomes a stop button while the voice is
+        // running, so it has to hear when that changes.
+        NotificationCenter.default.addObserver(self,
+                                               selector: #selector(audioStateChanged),
+                                               name: AudioPlayer.stateChanged,
+                                               object: nil)
 
         kicker.font = Self.kickerFont
         kicker.textColor = pillar.accent
@@ -290,6 +304,10 @@ final class ReaderPillarCard: NSView {
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    deinit {
+        NotificationCenter.default.removeObserver(self)
+    }
 
     override func draw(_ dirtyRect: NSRect) {
         drawReaderCard(bounds, accent: pillar.accent)
@@ -435,9 +453,36 @@ final class ReaderPillarCard: NSView {
         soundNote = note
 
         contentHeight?.constant = 24 + 6 + noteHeight
+        updateSoundButton()
+    }
+
+    /// The button under the sound card is a play button until something is
+    /// being read, and a stop button afterwards.
+    ///
+    /// The card is the one piece of the reader that is always about the
+    /// voice, so the way to stop it belongs there.
+    private func updateSoundButton() {
+        guard let button = playButton else { return }
+        let speaking = AudioPlayer.shared.isActive
+        let title = speaking ? "Stop" : "Play this chapter"
+        let symbol = speaking ? "stop.fill" : "speaker.wave.2.fill"
+        button.title = title
+        button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
+        button.setColoredTitle(title, color: pillar.accent,
+                               font: NSFont.systemFont(ofSize: 11, weight: .medium))
+    }
+
+    @objc private func audioStateChanged() {
+        updateSoundButton()
     }
 
     @objc private func playPressed() {
+        // The button says what it will do: stop the voice if there is one,
+        // otherwise read this chapter.
+        if AudioPlayer.shared.isActive {
+            onStopAudio?()
+            return
+        }
         guard let chapter else { return }
         onSpeakChapter?(chapter)
     }

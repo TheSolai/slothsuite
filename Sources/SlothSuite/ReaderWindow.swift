@@ -28,6 +28,8 @@ final class ReaderWindowController: NSObject, NSWindowDelegate {
     var onOpenInApp: ((Briefing) -> Void)?
     /// The reader in the pop-out wants to export.
     var onExport: ((Briefing) -> Void)?
+    /// The pop-out's reader asked to stop the voice.
+    var onStopAudio: (() -> Void)?
     /// The pop-out's reader moved to another chapter.
     var onChapterChanged: ((Int) -> Void)?
     /// The pop-out's reader moved to another place in the chapter.
@@ -57,6 +59,9 @@ final class ReaderWindowController: NSObject, NSWindowDelegate {
         }
         readerView.onExport = { [weak self] briefing in
             self?.onExport?(briefing)
+        }
+        readerView.onStopAudio = { [weak self] in
+            self?.onStopAudio?()
         }
         readerView.onChapterChanged = { [weak self] chapter in
             self?.onChapterChanged?(chapter)

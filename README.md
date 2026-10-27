@@ -223,6 +223,24 @@ threw it away, so the suite looked like it could read aloud and could not.
 - **Chapters** opens a pop-out window with *every* chapter and its full
   spoken script on one scrollable page, each with its own Play button.
 
+### Stopping it
+
+A voice that cannot be stopped is a voice that reads to the end of the book,
+so there is a stop wherever the voice can be started:
+
+- a **Stop** button in the reader's header, greyed out when the suite is
+  quiet and live the moment the voice starts;
+- the **sound card** in the reader's rail, whose play button becomes a stop
+  button while anything is being read;
+- **Stop Audio** in the File menu, on **⌘.**, which works from anywhere — the
+  library can start a summary talking, and the notes are where you are when
+  you change your mind about it.
+
+The stop is live the moment the speech is *asked for*, not when the audio
+starts playing, so a long chapter can be called off before the Mac has
+finished making it. The dock badge follows the voice: it says the suite is
+speaking while it is, and it goes when it stops.
+
 ## Inspecting the interface
 
 `screencapture` needs screen-recording permission, which a command-line
@@ -576,6 +594,15 @@ state, the bridge round trip, the library endpoint, the web-tool
 endpoints, the file picker, and finally that an upload actually reaches
 the briefing deck. It exits non-zero if anything fails, so it works as a
 build gate.
+
+The voice is checked too: that the stop is greyed out when the suite is
+quiet, that it comes alive when the voice starts, and that pressing it makes
+the voice quiet.
+
+A run leaves the reader's own books exactly as it found them: the whole
+learning store — notes, places, favourites, read state, the "continue
+reading" pointer — is taken before the first check and put back after the
+last one, and the put-back is written to the disk before the process exits.
 
 The reader's own behaviour is checked too: that a book opens on its
 briefing, that the briefing is there in the deck's shape, that the card's

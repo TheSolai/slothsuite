@@ -50,6 +50,17 @@ final class SelfTestRunner {
         // so a test which was interrupted still leaves it alone.
         if let saved = savedState {
             LearningStore.shared.restoreState(saved)
+            // The put-back has to be **on the disk** before the process
+            // leaves, not merely on its way there.
+            //
+            // An ordinary save is asynchronous: the store writes on its own
+            // queue, because a keystroke should not wait for the disk. A
+            // test that exits straight after asking for the restore is
+            // therefore a race, and it lost about one time in four: the
+            // reader came back to a stray note and a place the test had
+            // moved rather than the ones they had. `saveNow` is the
+            // version for a process that is on its way out.
+            LearningStore.shared.saveNow()
         }
         log.writeSync("SELFTEST end — \(checks - failures)/\(checks) checks passed")
         exit(failures == 0 ? 0 : 1)
@@ -321,7 +332,10 @@ final class SelfTestRunner {
         let learning = LearningStore.shared
         let before = Set(learning.allNotes.map(\.id))
 
-        guard let document = LibraryStore.shared.documents.first else {
+        // The book that was read last: it has a briefing, which a book that
+        // is still being analysed does not.
+        guard let id = learning.lastReadDocumentId,
+              let document = LibraryStore.shared.document(id: id) else {
             check("notes.send", true, "no document to send")
             then()
             return
@@ -358,6 +372,55 @@ final class SelfTestRunner {
             // The note is the reader's own writing; the check takes it away.
             learning.deleteNote(id: note.id)
             then()
+        }
+    }
+
+    /// The voice must be stoppable.
+    ///
+    /// A voice that cannot be stopped is a voice that reads to the end of the
+    /// book, and the button that stops it is the whole point of asking for
+    /// one. The check starts the voice, waits for the stop to come alive,
+    /// presses it, and waits for the voice to be quiet.
+    private func checkAudioStop(attempt: Int = 0, then: @escaping () -> Void) {
+        // 1. When the suite is quiet, the stop is greyed out.
+        AudioPlayer.shared.stop()
+        if attempt == 0 {
+            // Only reported on the first attempt: a retry would otherwise
+            // count the same assertion twice, and the gate's total would
+            // depend on how long the Mac took to start speaking.
+            let quiet = !controller.readerViewForTest.audioStopEnabledForTest
+            check("audio.stop", quiet,
+                  quiet ? "the stop is greyed out when nothing is playing"
+                        : "the stop is live when nothing is playing")
+        }
+
+        // 2. Start the voice, and the stop must come alive.
+        AudioPlayer.shared.speak("A short test of the stop button.", label: "Test")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+            guard let self else { return }
+            let live = self.controller.readerViewForTest.audioStopEnabledForTest
+            guard live else {
+                if attempt < 6 {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+                        self?.checkAudioStop(attempt: attempt + 1, then: then)
+                    }
+                    return
+                }
+                self.check("audio.stop.live", false, "the stop stayed greyed out")
+                then()
+                return
+            }
+            self.check("audio.stop.live", true, "the stop came alive")
+
+            // 3. Press it, and the voice must stop.
+            self.controller.readerViewForTest.pressAudioStopForTest()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+                guard let self else { return }
+                let stopped = !AudioPlayer.shared.isActive
+                self.check("audio.stopped", stopped,
+                           stopped ? "the voice stopped" : "the voice kept going")
+                then()
+            }
         }
     }
 
@@ -969,7 +1032,9 @@ final class SelfTestRunner {
                 self.log.write("SELFTEST INFO deck-visible=\(deck)")
                 self.removeUploadedDocuments()
                 self.checkSendToNotes { [self] in
-                    self.checkReaderOpensOnItsBriefing()
+                    self.checkAudioStop { [self] in
+                        self.checkReaderOpensOnItsBriefing()
+                    }
                 }
             }
         }

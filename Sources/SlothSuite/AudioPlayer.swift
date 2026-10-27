@@ -15,14 +15,25 @@ final class AudioPlayer: NSObject {
     static let shared = AudioPlayer()
 
     /// What the player is doing right now.
-    enum State {
+    enum State: Equatable {
         case idle
         case speaking
         case queued(Int)
     }
 
-    /// Called whenever the state changes, so the interface can show it.
-    var onStateChange: ((State) -> Void)?
+    /// Posted when the player changes what it is doing.
+    ///
+    /// A notification rather than a callback: there can be a reader in the
+    /// suite and a reader in the pop-out window, and both have to hear it.
+    static let stateChanged = Notification.Name("SlothSuite.audioPlayerStateChanged")
+
+    /// What the player is doing.
+    private(set) var state: State = .idle
+
+    /// Is anything being read aloud?
+    ///
+    /// The interface asks this to know whether to offer a way to stop.
+    var isActive: Bool { state != .idle }
 
     private var player: AVAudioPlayer?
     private var queue: [String] = []
@@ -42,6 +53,10 @@ final class AudioPlayer: NSObject {
     func speak(_ text: String, label: String = "") {
         stop()
         generation += 1
+        // The voice is on its way even before the audio exists, so the stop
+        // is live straight away: a long chapter can be called off before it
+        // has finished being made.
+        setState(.queued(1))
         speak(text, label: label, generation: generation)
     }
 
@@ -55,14 +70,14 @@ final class AudioPlayer: NSObject {
 
         let usable = texts.filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
         guard !usable.isEmpty else {
-            onStateChange?(.idle)
+            setState(.idle)
             return
         }
 
         queue = usable
         queueIndex = 0
         self.labels = labels.count == usable.count ? labels : usable.map { _ in "" }
-        onStateChange?(.queued(1))
+        setState(.queued(1))
         playNext(generation: generation)
     }
 
@@ -75,21 +90,37 @@ final class AudioPlayer: NSObject {
         labels.removeAll()
         player?.stop()
         player = nil
-        onStateChange?(.idle)
+        setState(.idle)
     }
 
     // MARK: - Internals
+
+    /// Record what the player is doing, and tell the interface.
+    ///
+    /// The state belongs to the main thread. The player hears a chapter
+    /// finish on its own audio thread, and a notification posted from there
+    /// would run the interface's handlers off the main thread — where they
+    /// would be touching buttons that AppKit says may only be touched from
+    /// the main thread. So the change is taken across first.
+    private func setState(_ new: State) {
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { [weak self] in self?.setState(new) }
+            return
+        }
+        state = new
+        NotificationCenter.default.post(name: AudioPlayer.stateChanged, object: self)
+    }
 
     private func playNext(generation: Int) {
         guard generation == self.generation else { return }
         guard queueIndex < queue.count else {
             player = nil
-            onStateChange?(.idle)
+            setState(.idle)
             return
         }
 
         let text = queue[queueIndex]
-        onStateChange?(.queued(queueIndex + 1))
+        setState(.queued(queueIndex + 1))
         speak(text, label: queueIndex < labels.count ? labels[queueIndex] : "", generation: generation)
     }
 
@@ -124,7 +155,7 @@ final class AudioPlayer: NSObject {
             player.prepareToPlay()
             player.play()
             self.player = player
-            onStateChange?(.speaking)
+            setState(.speaking)
         } catch {
             Log.shared.write("could not play the synthesised audio: \(error)")
             queueIndex += 1
@@ -135,10 +166,16 @@ final class AudioPlayer: NSObject {
 
 extension AudioPlayer: AVAudioPlayerDelegate {
     /// When one piece finishes, the next one starts.
+    ///
+    /// The player hears this on its own audio thread, and the queue belongs
+    /// to the main thread, so the step across happens here rather than
+    /// somewhere deeper down.
     func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
-        guard generation == self.generation else { return }
-        queueIndex += 1
-        playNext(generation: generation)
+        DispatchQueue.main.async { [weak self] in
+            guard let self, generation == self.generation else { return }
+            self.queueIndex += 1
+            self.playNext(generation: generation)
+        }
     }
 
     func audioPlayerDecodeErrorDidOccur(_ player: AVAudioPlayer, error: Error?) {
