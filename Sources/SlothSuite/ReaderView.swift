@@ -1333,8 +1333,61 @@ final class ReaderView: NSView {
         whole.target = self
         menu.addItem(whole)
 
+        // The voice that will do the reading.
+        let voice = NSMenuItem(title: "Voice", action: nil, keyEquivalent: "")
+        voice.submenu = makeVoiceMenu()
+        menu.addItem(voice)
+
         guard let listenButton else { return }
         menu.popUp(positioning: nil, at: NSPoint(x: 0, y: listenButton.bounds.height + 6), in: listenButton)
+    }
+
+    /// The voices the suite can read with.
+    ///
+    /// The Mac's own voice, and every Phonon voice Ollama has. The one in
+    /// use is ticked, so the menu says what is happening rather than what
+    /// might happen.
+    private func makeVoiceMenu() -> NSMenu {
+        let menu = NSMenu()
+        let current = VoiceService.shared.voice
+
+        let mac = NSMenuItem(title: ReadingVoice.mac.displayName,
+                             action: #selector(chooseVoice(_:)), keyEquivalent: "")
+        mac.target = self
+        mac.representedObject = ReadingVoice.mac.storedValue
+        mac.state = (current == .mac) ? .on : .off
+        menu.addItem(mac)
+
+        let voices = VoiceService.shared.phononVoices
+        if voices.isEmpty {
+            // Ollama has not answered yet. Ask again, so the next time the
+            // menu is opened they are there.
+            VoiceService.shared.refreshVoices()
+            let waiting = NSMenuItem(title: "Phonon voices \u{2014} Ollama is not answering",
+                                     action: nil, keyEquivalent: "")
+            waiting.isEnabled = false
+            menu.addItem(waiting)
+        } else {
+            menu.addItem(.separator())
+            for name in voices {
+                let choice = ReadingVoice.phonon(name)
+                let item = NSMenuItem(title: choice.displayName,
+                                      action: #selector(chooseVoice(_:)), keyEquivalent: "")
+                item.target = self
+                item.representedObject = choice.storedValue
+                item.state = (current == choice) ? .on : .off
+                menu.addItem(item)
+            }
+        }
+
+        return menu
+    }
+
+    /// Read the books with a different voice.
+    @objc private func chooseVoice(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String,
+              let choice = ReadingVoice.fromStored(raw) else { return }
+        VoiceService.shared.choose(choice)
     }
 
     @objc private func speakChapter(_ sender: NSMenuItem) {

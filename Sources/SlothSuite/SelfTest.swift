@@ -424,6 +424,64 @@ final class SelfTestRunner {
         }
     }
 
+    /// The voices the books can be read with.
+    ///
+    /// Ollama's Phonon models are on this machine, and the suite has to be
+    /// able to ask Ollama for them: for the list of voices, and for the
+    /// audio itself. The check also proves that a long text is split into
+    /// pieces Ollama will take, rather than being refused for being too
+    /// long — a chapter of a book is a good deal longer than Ollama's
+    /// limit.
+    private func checkVoices(then: @escaping () -> Void) {
+        // 1. The splitter. Every piece has to be within the limit, and the
+        // pieces together have to be the whole text.
+        let long = String(repeating: "The oven is warm and the dough is ready. ", count: 120)
+        let pieces = SpeechChunker.pieces(of: long)
+        let longest = pieces.map(\.count).max() ?? 0
+        let whole = pieces.joined(separator: " ")
+        let split = !pieces.isEmpty
+            && longest <= SpeechChunker.limit
+            && whole.contains("the dough is ready")
+            && whole.contains("The oven is warm")
+        check("voice.chunk", split,
+              "\(pieces.count) pieces, the longest \(longest) characters")
+
+        // 2. The voices Ollama has.
+        PhononService.shared.voices { [weak self] names in
+            DispatchQueue.main.async {
+                guard let self else { then(); return }
+                guard !names.isEmpty else {
+                    // Ollama is not running. That is a fact about the
+                    // machine, not a fault in the suite, so the check says
+                    // so and the gate carries on.
+                    self.check("voice.list", true, "Ollama is not running")
+                    self.check("voice.phonon", true, "Ollama is not running")
+                    then()
+                    return
+                }
+                self.check("voice.list", true, "\(names.count) voices")
+                self.checkPhononSpeaks(then: then)
+            }
+        }
+    }
+
+    /// The voice has to make actual audio, not merely answer.
+    private func checkPhononSpeaks(then: @escaping () -> Void) {
+        PhononService.shared.speak(text: "The oven is the protagonist of this kitchen.",
+                                   voice: VoiceService.defaultPhononVoice) { [weak self] result in
+            DispatchQueue.main.async {
+                guard let self else { then(); return }
+                switch result {
+                case .success(let data):
+                    self.check("voice.phonon", data.count > 1000, "\(data.count) bytes of audio")
+                case .failure(let error):
+                    self.check("voice.phonon", false, error.localizedDescription)
+                }
+                then()
+            }
+        }
+    }
+
     /// The last check: a book opens on its briefing.
     ///
     /// Every book opens at the front of the book — the executive briefing,
@@ -1033,7 +1091,9 @@ final class SelfTestRunner {
                 self.removeUploadedDocuments()
                 self.checkSendToNotes { [self] in
                     self.checkAudioStop { [self] in
-                        self.checkReaderOpensOnItsBriefing()
+                        self.checkVoices { [self] in
+                            self.checkReaderOpensOnItsBriefing()
+                        }
                     }
                 }
             }

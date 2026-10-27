@@ -735,6 +735,65 @@ AddressSanitizer reports no use-after-free; and the suite contains no
 It is worth finding. It is recorded here so that it is not forgotten, and
 so that whoever finds it first knows what it looks like.
 
+## Phase 13 — the voices
+
+*"Ollama has just released voice models, I want them to read out our
+books. It's already on my Mac."*
+
+Ollama 0.40.11 (24 October) added text-to-speech on macOS, and it does it
+with **Phonon** — Gradium's small speech model, run locally by Ollama
+through MLX. The model was already on this machine: `phonon`, `phonon:en`,
+`phonon:40m-en` and `phonon:40m-multilingual`, pulled the day before.
+
+**Thirty-eight voices.** Plain narrators — Freya, Harper, Zoey, Easton —
+and character voices: *Grub the Ogre*, *Fairy Godmother*, *Captain Silas
+Blackwater*, *The Snow Queen*, *The Thing Under the Stairs*. The Mac has
+one voice. The books deserve better than that.
+
+### How the suite asks for it
+
+Ollama speaks through an OpenAI-compatible endpoint,
+`POST /v1/audio/speech`, with the model, the text and the voice's name.
+The address is written down in the suite — Ollama's own, on this machine —
+so nothing that arrives in a document or a web page can point the suite
+somewhere else. No key, no network, no cloud.
+
+The voice is chosen in the reader's **Listen ▸ Voice** menu, or from the
+command palette. The one in use is ticked, and the sidebar says which it
+is. The **Mac's own voice** is still there, one click away.
+
+### A chapter is longer than Ollama will take
+
+Ollama refuses more than 4096 characters in a request, and a chapter of a
+book is a good deal longer than that. The text is split at a paragraph,
+then at a sentence, then at a space — the places a reader would break it
+— and a word is never cut in half.
+
+The audio is then made a piece at a time and played as it arrives. Before
+this, a chapter was made whole and then played, which meant waiting for
+the whole chapter before hearing any of it. Now the first words are
+heard about three seconds in, and the rest is made while the earlier part
+is being read. Only two pieces are ever waiting, so the audio does not
+pile up in memory faster than it is played.
+
+### If Ollama is not running
+
+The Mac's voice reads the piece instead, and the reader is told once that
+their Phonon voice is not answering. A book read in the wrong voice is
+better than a book that is not read at all.
+
+### How it is checked
+
+- `voice.chunk` checks that a long text is split into pieces Ollama will
+  accept, and that the pieces together are the whole text.
+- `voice.list` checks that the voices are fetched from Ollama.
+- `voice.phonon` checks that Ollama returns actual audio, not merely an
+  answer.
+
+All three are in the gate, and they use the real Ollama on this machine
+rather than a mock. If Ollama is not running they say so and the gate
+carries on: a fact about the machine is not a fault in the suite.
+
 ## Phase 7 — the fourth ten: a learning desk that remembers
 
 *"Now make 10 QoL improvements."* Every one of these was a gap found by
@@ -923,7 +982,7 @@ Building the gate found four real defects that had been invisible:
 
 ## Verified
 
-The gate (`./build.sh test`) is green at **63/63**, exit 0:
+The gate (`./build.sh test`) is green at **66/66**, exit 0:
 
 ```
 config.apps, config.services, stack.script, stack.ports.read,
@@ -936,6 +995,7 @@ briefing.shape, reader.chips, reader.keywords, reader.follows, reader.pillars,
 reader.width, reader.briefing, reader.popout, reader.opening,
 reader.keepsplace, notes.send, library.menu, library.rightclick,
 audio.stop, audio.stop.live, audio.stopped,
+voice.chunk, voice.list, voice.phonon,
 web.endpoint.read, provider.endpoint, mac.service, mac.chat, mac.speak,
 selftest.fixture, filepicker.fired, upload.pipeline, reader.position,
 reader.persist, notes.chapter, notes.export, library.sort, library.bulk,
@@ -961,6 +1021,12 @@ card's menu the way a person does — both ways in — and then take the note
 they made away again. The three `audio.*` checks use the Mac's own voice
 rather than a mock: they start it, wait for the stop to come alive, press it
 and wait for the voice to be quiet.
+
+The three `voice.*` checks use the real Ollama on this machine: that a
+long text is split into pieces Ollama will accept, that the voices can be
+fetched, and that Ollama returns actual audio rather than merely an
+answer. If Ollama is not running they say so and the gate carries on — a
+fact about the machine is not a fault in the suite.
 
 The whole learning store is snapshotted at the start of the run and put
 back at the end, and the put-back is **written to the disk before the

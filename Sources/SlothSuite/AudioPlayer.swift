@@ -2,15 +2,14 @@ import AVFoundation
 import Cocoa
 import Foundation
 
-/// Plays the audio the Mac service synthesises.
+/// Plays the audio the voice service makes.
 ///
-/// The service returns a WAV, not playback — it hands back the bytes and
-/// leaves playing them to the shell. Until this existed, the "speak"
-/// buttons generated a file and threw it away, so the suite looked like it
-/// could read aloud and could not.
-///
-/// Playback is queued so that "play every chapter" reads the chapters one
-/// after another instead of piling them on top of each other.
+/// The audio is made in pieces. A long chapter is too long for one
+/// request, and even when it is not, making the whole thing before playing
+/// any of it would mean a wait before the first word. So the audio is
+/// made a piece at a time and played as it arrives: the reader hears the
+/// first words of a chapter in a few seconds, and the rest is made while
+/// the earlier part is being read.
 final class AudioPlayer: NSObject {
     static let shared = AudioPlayer()
 
@@ -35,11 +34,43 @@ final class AudioPlayer: NSObject {
     /// The interface asks this to know whether to offer a way to stop.
     var isActive: Bool { state != .idle }
 
+    /// The piece being played.
     private var player: AVAudioPlayer?
-    private var queue: [String] = []
-    private var queueIndex = 0
-    private var labels: [String] = []
+
+    /// The texts still to be read.
+    private var texts: [String] = []
+
+    /// Which text is being made into audio.
+    private var textIndex = 0
+
+    /// Which piece of that text is being made.
+    private var pieceIndex = 0
+
+    /// Audio that has been made and is waiting to be played.
+    private var pending: [AVAudioPlayer] = []
+
+    /// Whether something is playing right now.
+    private var playing = false
+
+    /// Whether a piece is being made right now.
+    ///
+    /// Only one request is ever in flight: the pieces have to arrive in
+    /// the order they were asked for, and two requests at once would not
+    /// promise that.
+    private var making = false
+
+    /// The count of what has been asked for.
+    ///
+    /// A stop throws the count away, so the work of a reading that has
+    /// ended can never be mistaken for the work of the next one.
     private var generation = 0
+
+    /// How many pieces may be waiting.
+    ///
+    /// Two is enough to keep the reading going without a gap, and small
+    /// enough that the audio waiting to be played does not fill the
+    /// machine's memory.
+    private static let bufferLimit = 2
 
     private override init() {
         super.init()
@@ -47,23 +78,18 @@ final class AudioPlayer: NSObject {
 
     var isSpeaking: Bool { player?.isPlaying ?? false }
 
-    // MARK: - Single utterance
+    // MARK: - Reading
 
     /// Read one piece of text aloud.
     func speak(_ text: String, label: String = "") {
-        stop()
-        generation += 1
-        // The voice is on its way even before the audio exists, so the stop
-        // is live straight away: a long chapter can be called off before it
-        // has finished being made.
-        setState(.queued(1))
-        speak(text, label: label, generation: generation)
+        speakAll([text], labels: [label])
     }
 
     /// Read several pieces of text one after another.
     ///
-    /// `labels` names each piece, so the interface can show what is being
-    /// read — "Chapter 3 of 10" rather than a spinner.
+    /// `labels` names each piece — "Chapter 3 of 10" rather than a
+    /// spinner. Nothing shows the label yet, but the caller knows what it
+    /// is reading, so the name is taken rather than refused.
     func speakAll(_ texts: [String], labels: [String] = []) {
         stop()
         generation += 1
@@ -74,22 +100,112 @@ final class AudioPlayer: NSObject {
             return
         }
 
-        queue = usable
-        queueIndex = 0
-        self.labels = labels.count == usable.count ? labels : usable.map { _ in "" }
+        self.texts = usable
+        textIndex = 0
+        pieceIndex = 0
         setState(.queued(1))
-        playNext(generation: generation)
+        makeNextPiece(generation: generation)
     }
 
-    // MARK: - Stopping
-
+    /// Stop everything.
     func stop() {
         generation += 1
-        queue.removeAll()
-        queueIndex = 0
-        labels.removeAll()
+        texts.removeAll()
+        pending.removeAll()
+        textIndex = 0
+        pieceIndex = 0
+        playing = false
+        making = false
         player?.stop()
         player = nil
+        setState(.idle)
+    }
+
+    // MARK: - Making the audio
+
+    /// Ask for the next piece of audio.
+    ///
+    /// Only one piece is being made at a time, and the next one is asked
+    /// for as soon as there is room for it. That is what makes a long
+    /// chapter start playing in a few seconds rather than after the whole
+    /// chapter has been made.
+    private func makeNextPiece(generation: Int) {
+        guard generation == self.generation else { return }
+        guard !making else { return }
+        guard pending.count < Self.bufferLimit else { return }
+        guard textIndex < texts.count else { return }
+
+        let text = texts[textIndex]
+        let count = VoiceService.shared.pieceCount(for: text)
+        guard pieceIndex < count else {
+            // This text has been made. Move on to the next one.
+            textIndex += 1
+            pieceIndex = 0
+            if textIndex < texts.count { setState(.queued(textIndex + 1)) }
+            makeNextPiece(generation: generation)
+            return
+        }
+
+        let index = pieceIndex
+        pieceIndex += 1
+        making = true
+
+        VoiceService.shared.makePiece(of: text, at: index) { [weak self] result in
+            DispatchQueue.main.async {
+                guard let self, generation == self.generation else { return }
+                self.making = false
+                switch result {
+                case .success(let data):
+                    self.addToBuffer(data)
+                case .failure(let error):
+                    Log.shared.write("could not make the audio: \(error)")
+                }
+                self.playNextPiece(generation: generation)
+                self.makeNextPiece(generation: generation)
+            }
+        }
+    }
+
+    /// Put a piece of audio in the buffer, ready to play.
+    private func addToBuffer(_ data: Data) {
+        guard !data.isEmpty else { return }
+        do {
+            let player = try AVAudioPlayer(data: data)
+            player.delegate = self
+            // Prepared now, so that the next piece starts the moment the
+            // one before it ends rather than a moment after.
+            player.prepareToPlay()
+            pending.append(player)
+        } catch {
+            Log.shared.write("could not prepare the audio: \(error)")
+        }
+    }
+
+    /// Play the next piece, if there is one and nothing is playing.
+    private func playNextPiece(generation: Int) {
+        guard generation == self.generation else { return }
+        guard !playing else { return }
+
+        guard !pending.isEmpty else {
+            // Nothing to play yet. Either more is on its way, or it is all
+            // over.
+            if !making { finishIfOver() }
+            makeNextPiece(generation: generation)
+            return
+        }
+
+        let next = pending.removeFirst()
+        next.play()
+        player = next
+        playing = true
+        setState(.speaking)
+        // Keep the buffer topped up while this one is being read.
+        makeNextPiece(generation: generation)
+    }
+
+    /// Nothing left to read and nothing left to play: the reading is over.
+    private func finishIfOver() {
+        guard textIndex >= texts.count, pending.isEmpty, !playing, !making else { return }
         setState(.idle)
     }
 
@@ -110,58 +226,6 @@ final class AudioPlayer: NSObject {
         state = new
         NotificationCenter.default.post(name: AudioPlayer.stateChanged, object: self)
     }
-
-    private func playNext(generation: Int) {
-        guard generation == self.generation else { return }
-        guard queueIndex < queue.count else {
-            player = nil
-            setState(.idle)
-            return
-        }
-
-        let text = queue[queueIndex]
-        setState(.queued(queueIndex + 1))
-        speak(text, label: queueIndex < labels.count ? labels[queueIndex] : "", generation: generation)
-    }
-
-    private func speak(_ text: String, label: String, generation: Int) {
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else {
-            queueIndex += 1
-            playNext(generation: generation)
-            return
-        }
-
-        MacServices.shared.speak(text: trimmed) { [weak self] result in
-            DispatchQueue.main.async {
-                guard let self, generation == self.generation else { return }
-
-                switch result {
-                case .success(let data):
-                    self.play(data: data, generation: generation)
-                case .failure(let error):
-                    Log.shared.write("could not synthesise audio: \(error)")
-                    self.queueIndex += 1
-                    self.playNext(generation: generation)
-                }
-            }
-        }
-    }
-
-    private func play(data: Data, generation: Int) {
-        do {
-            let player = try AVAudioPlayer(data: data)
-            player.delegate = self
-            player.prepareToPlay()
-            player.play()
-            self.player = player
-            setState(.speaking)
-        } catch {
-            Log.shared.write("could not play the synthesised audio: \(error)")
-            queueIndex += 1
-            playNext(generation: generation)
-        }
-    }
 }
 
 extension AudioPlayer: AVAudioPlayerDelegate {
@@ -172,9 +236,12 @@ extension AudioPlayer: AVAudioPlayerDelegate {
     /// somewhere deeper down.
     func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
         DispatchQueue.main.async { [weak self] in
-            guard let self, generation == self.generation else { return }
-            self.queueIndex += 1
-            self.playNext(generation: generation)
+            guard let self else { return }
+            self.playing = false
+            self.player = nil
+            self.playNextPiece(generation: self.generation)
+            self.makeNextPiece(generation: self.generation)
+            self.finishIfOver()
         }
     }
 

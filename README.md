@@ -241,6 +241,36 @@ starts playing, so a long chapter can be called off before the Mac has
 finished making it. The dock badge follows the voice: it says the suite is
 speaking while it is, and it goes when it stops.
 
+### The voices
+
+The books can be read in more than one voice, and the voices all run on
+this Mac.
+
+**Phonon** is Gradium's text-to-speech model, which Ollama runs locally
+since version 0.40.11. It has **thirty-eight voices** — plain narrators
+like Freya, Harper and Zoey, and character voices like *Grub the Ogre*,
+*Fairy Godmother* and *Captain Silas Blackwater*. Ollama speaks through an
+OpenAI-compatible endpoint, so the suite asks it for audio the same way it
+would ask a cloud service, except that the address is this machine's own
+and no key is involved.
+
+The voice is chosen in the reader's **Listen ▸ Voice** menu, or from the
+command palette (**⌘K**, "Reading voice"). The current one is ticked, and
+the sidebar says which is in use.
+
+A chapter is longer than Ollama will take in one request — the limit is
+4096 characters — so the text is split at a paragraph, then at a sentence,
+then at a space, and the pieces are read one after another. A word is
+never cut in half.
+
+The audio is made a piece at a time and played as it arrives, so the
+first words of a chapter are heard in a few seconds rather than after the
+whole chapter has been made.
+
+The **Mac's own voice** is still there and still one click away, and the
+suite falls back to it if Ollama is not running — a book that is read in
+the wrong voice is better than a book that is not read at all.
+
 ## Inspecting the interface
 
 `screencapture` needs screen-recording permission, which a command-line
@@ -598,6 +628,11 @@ build gate.
 The voice is checked too: that the stop is greyed out when the suite is
 quiet, that it comes alive when the voice starts, and that pressing it makes
 the voice quiet.
+
+The voices are checked against the real Ollama on this machine: that a long
+text is split into pieces Ollama will accept, that the voices can be
+fetched, and that Ollama returns actual audio. If Ollama is not running the
+checks say so and the gate carries on.
 
 A run leaves the reader's own books exactly as it found them: the whole
 learning store — notes, places, favourites, read state, the "continue

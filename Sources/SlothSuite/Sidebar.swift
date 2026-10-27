@@ -32,6 +32,7 @@ final class SidebarView: NSVisualEffectView {
     private var navButtons: [String: NavButton] = [:]
     private let statusLabel = NSTextField(labelWithString: "")
     private let providerLabel = NSTextField(labelWithString: "")
+    private let voiceLabel = NSTextField(labelWithString: "")
     private let menuButton = NSButton(title: "", target: nil, action: nil)
 
     init(modules: [SuiteModule]) {
@@ -41,6 +42,7 @@ final class SidebarView: NSVisualEffectView {
         // never moved by its constraints.
         statusLabel.translatesAutoresizingMaskIntoConstraints = false
         providerLabel.translatesAutoresizingMaskIntoConstraints = false
+        voiceLabel.translatesAutoresizingMaskIntoConstraints = false
 
         super.init(frame: .zero)
 
@@ -92,15 +94,25 @@ final class SidebarView: NSVisualEffectView {
         providerLabel.textColor = .tertiaryLabelColor
         providerLabel.lineBreakMode = .byTruncatingTail
 
+        // Which voice reads the books. The reader's Listen menu is where
+        // it is chosen; this says which one it is.
+        voiceLabel.font = Typography.caption()
+        voiceLabel.textColor = .tertiaryLabelColor
+        voiceLabel.lineBreakMode = .byTruncatingTail
+
         statusBox.addSubview(statusLabel)
         statusBox.addSubview(providerLabel)
+        statusBox.addSubview(voiceLabel)
         statusLabel.leadingAnchor.constraint(equalTo: statusBox.leadingAnchor).isActive = true
         statusLabel.trailingAnchor.constraint(equalTo: statusBox.trailingAnchor).isActive = true
         statusLabel.topAnchor.constraint(equalTo: statusBox.topAnchor).isActive = true
         providerLabel.leadingAnchor.constraint(equalTo: statusBox.leadingAnchor).isActive = true
         providerLabel.trailingAnchor.constraint(equalTo: statusBox.trailingAnchor).isActive = true
         providerLabel.topAnchor.constraint(equalTo: statusLabel.bottomAnchor, constant: 2).isActive = true
-        statusBox.bottomAnchor.constraint(equalTo: providerLabel.bottomAnchor).isActive = true
+        voiceLabel.leadingAnchor.constraint(equalTo: statusBox.leadingAnchor).isActive = true
+        voiceLabel.trailingAnchor.constraint(equalTo: statusBox.trailingAnchor).isActive = true
+        voiceLabel.topAnchor.constraint(equalTo: providerLabel.bottomAnchor, constant: 2).isActive = true
+        statusBox.bottomAnchor.constraint(equalTo: voiceLabel.bottomAnchor).isActive = true
 
         // A fixed width so the labels truncate instead of pushing the sidebar
         // wider than its own column.
@@ -171,6 +183,11 @@ final class SidebarView: NSVisualEffectView {
     func setProvider(_ text: String) {
         providerLabel.stringValue = text
         providerLabel.textColor = Palette.blue.withAlphaComponent(0.8)
+    }
+
+    /// Say which voice is reading the books.
+    func setVoice(_ text: String) {
+        voiceLabel.stringValue = text
     }
 
     // MARK: - Menu

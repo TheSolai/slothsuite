@@ -177,6 +177,20 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
 
         library.startPolling(spec: specs.first(where: { $0.supportsLibrary }))
 
+        // The voices Ollama has. They are asked for now so the menu that
+        // chooses one is ready the moment it is opened.
+        VoiceService.shared.refreshVoices()
+        sidebar.setVoice("Voice: \(VoiceService.shared.voice.displayName)")
+
+        // And the sidebar follows the voice when it changes.
+        NotificationCenter.default.addObserver(
+            forName: VoiceService.voiceChanged,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.sidebar.setVoice("Voice: \(VoiceService.shared.voice.displayName)")
+        }
+
         NSApp.activate(ignoringOtherApps: true)
 
         if let problem = configProblem {
@@ -2165,6 +2179,12 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
         commands.append(CommandPalette.Command(title: "Continue reading…") { [weak self] in
             self?.continueReading()
         })
+        commands.append(CommandPalette.Command(
+            title: "Reading voice: \(VoiceService.shared.voice.displayName)",
+            subtitle: "Choose the voice that reads the books"
+        ) {
+            VoicePicker.present()
+        })
         commands.append(CommandPalette.Command(title: "Export as separate files…") { [weak self] in
             self?.performExport(document: nil)
         })
@@ -2370,6 +2390,9 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
     // MARK: - Self test
 
     private func runSelfTest() {
+        // The self-test has nobody in front of it, so it must not put a
+        // panel up and wait for an answer.
+        VoiceService.shared.allowsAlerts = false
         let runner = SelfTestRunner(controller: self)
         selfTestRunner = runner
         runner.begin()
