@@ -18,13 +18,22 @@ struct StudyNote: Codable, Identifiable, Equatable {
     /// belonging to the overview.
     var chapter: Int = 0
 
+    /// The passage of the book the note is about.
+    ///
+    /// A note written against the original holds the words it was written
+    /// about, so the note can be found again in the book rather than only
+    /// remembered as being somewhere in it. A note written against the
+    /// briefing has no quote: there was no passage to quote.
+    var quote: String? = nil
+
     init(id: String,
          documentId: String,
          documentTitle: String,
          body: String,
          createdAt: Date,
          updatedAt: Date,
-         chapter: Int = 0) {
+         chapter: Int = 0,
+         quote: String? = nil) {
         self.id = id
         self.documentId = documentId
         self.documentTitle = documentTitle
@@ -32,6 +41,7 @@ struct StudyNote: Codable, Identifiable, Equatable {
         self.createdAt = createdAt
         self.updatedAt = updatedAt
         self.chapter = chapter
+        self.quote = quote
     }
 
     /// Read a note written by an older version of the suite.
@@ -48,16 +58,36 @@ struct StudyNote: Codable, Identifiable, Equatable {
         createdAt = try container.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date()
         updatedAt = try container.decodeIfPresent(Date.self, forKey: .updatedAt) ?? Date()
         chapter = try container.decodeIfPresent(Int.self, forKey: .chapter) ?? 0
+        quote = try container.decodeIfPresent(String.self, forKey: .quote)
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, documentId, documentTitle, body, createdAt, updatedAt, chapter
+        case id, documentId, documentTitle, body, createdAt, updatedAt, chapter, quote
     }
 
     /// The first line, for a list row.
     var preview: String {
         let first = body.split(separator: "\n", omittingEmptySubsequences: true).first.map(String.init) ?? ""
         return first.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Is this note attached to a passage of the book?
+    var isAttachedToPassage: Bool {
+        guard let quote else { return false }
+        return !quote.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    /// The passage, shortened to one line.
+    ///
+    /// The words of the passage, with the length they were written at
+    /// taken off the end.
+    var quotePreview: String {
+        guard let quote else { return "" }
+        let flat = quote
+            .replacingOccurrences(of: "\n", with: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard flat.count > 90 else { return flat }
+        return String(flat.prefix(90)) + "\u{2026}"
     }
 
     /// A one-line summary, for the command palette.
@@ -461,7 +491,8 @@ final class LearningStore {
     func addNote(documentId: String? = nil,
                  documentTitle: String = "",
                  body: String = "",
-                 chapter: Int = 0) -> StudyNote {
+                 chapter: Int = 0,
+                 quote: String? = nil) -> StudyNote {
         let now = Date()
         let note = StudyNote(
             id: UUID().uuidString,
@@ -470,7 +501,8 @@ final class LearningStore {
             body: body,
             createdAt: now,
             updatedAt: now,
-            chapter: chapter
+            chapter: chapter,
+            quote: quote
         )
         mutate { $0.notes.append(note) }
         commit()

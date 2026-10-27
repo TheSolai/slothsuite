@@ -399,6 +399,34 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
             AudioPlayer.shared.speak("This is the Mac's own voice reading a sentence, so that the stop button can be seen in the capture.",
                                      label: "Test")
             Log.shared.write("snapshot action — started the voice")
+        case "readeroriginal":
+            // The book itself, rather than the summary of it.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
+                self?.readerView.setMode(.original)
+                Log.shared.write("snapshot action — showed the original")
+            }
+        case "quotenote":
+            // A note written on a passage, shown in the list so the row can
+            // be looked at. It is put into the view and not into the
+            // reader's own notes: a render must not change what is on the
+            // disk.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+                guard let self else { return }
+                let note = StudyNote(
+                    id: UUID().uuidString,
+                    documentId: "7b413d2a-3664-4a32-949b-09eecfd93951",
+                    documentTitle: "The Soul System of Tarot",
+                    body: "The daily draw is the spine of the practice \u{2014} everything else hangs off it.",
+                    createdAt: Date(),
+                    updatedAt: Date(),
+                    chapter: 10,
+                    quote: "The Daily Draw Practice is the one habit that keeps the rest of the system alive."
+                )
+                self.notesView.injectedNotes = [note]
+                self.notesView.show(notes: LearningStore.shared.allNotes)
+                self.notesView.select(noteId: note.id)
+                Log.shared.write("snapshot action \u{2014} showed a note with a passage")
+            }
         case "readerlower":
             // The reader puts itself back where it was when the briefing
             // arrives, which can be after this action runs. So the scroll
@@ -674,6 +702,9 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
             // A note knows the chapter it was taken from, so it opens there.
             self?.openDocument(id: note.documentId,
                                opening: note.chapter > 0 ? .chapter(note.chapter, 0) : nil)
+        }
+        notesView.onShowPassage = { [weak self] note in
+            self?.showPassage(note)
         }
         notesView.onSearch = { [weak self] query in
             self?.filterNotes(query)
@@ -1109,6 +1140,12 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
         reader.onOpenInApp = { [weak self] briefing in
             self?.openInApp(documentId: briefing.documentId)
         }
+        reader.onRequestOriginal = { [weak self] in
+            self?.loadOriginalForReader()
+        }
+        reader.onAddNoteForPassage = { [weak self] quote, chapter in
+            self?.startNote(onPassage: quote, chapter: chapter)
+        }
         reader.onExport = { [weak self] _ in
             self?.performExport(document: nil)
         }
@@ -1125,6 +1162,83 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
         }
         reader.onPopOut = { [weak self] in
             self?.togglePopOut()
+        }
+    }
+
+    // MARK: - The book itself
+
+    /// Fetch the original of the book being read.
+    ///
+    /// The original is the file the reader brought in. It is kept beside
+    /// the synthesis, because the synthesis is a distillation and the
+    /// book's own words are not in it.
+    private func loadOriginalForReader() {
+        guard let id = openDocumentId,
+              let spec = specs.first(where: { $0.supportsLibrary }) else { return }
+        OriginalStore.shared.load(documentId: id, spec: spec) { [weak self] document in
+            self?.readerView.setOriginal(document)
+        }
+    }
+
+    /// Write a note on a passage of the book.
+    ///
+    /// The note holds the words it was written about, so it can be found
+    /// again in the book, and the reader is taken to the notes to write
+    /// what they think about it.
+    private func startNote(onPassage quote: String, chapter: Int) {
+        guard let id = openDocumentId else { return }
+        let title = LibraryStore.shared.document(id: id)?.title ?? ""
+        startNote(forDocumentId: id, title: title, chapter: chapter, quote: quote)
+    }
+
+    /// Take a note back to the passage it was written about.
+    ///
+    /// The book opens in its original, at the chapter the note was taken
+    /// from, with the passage chosen.
+    private func showPassage(_ note: StudyNote) {
+        guard !note.documentId.isEmpty else { return }
+        guard let quote = note.quote, !quote.isEmpty else { return }
+
+        openDocument(id: note.documentId,
+                     opening: note.chapter > 0 ? .chapter(note.chapter, 0) : nil)
+
+        // The book has to be open before the passage can be shown in it,
+        // so the request waits for the reader to have the document.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+            self?.readerView.showPassage(chapter: max(note.chapter, 1), quote: quote)
+        }
+    }
+
+    /// Give a book its original file back.
+    ///
+    /// The original was deleted for a while, so books added before it was
+    /// kept have no file of their own. The file is on the reader's disk;
+    /// this is how it is handed back, without paying for another
+    /// synthesis.
+    @objc private func attachOriginal() {
+        guard let id = openDocumentId else {
+            presentError(title: "No book is open",
+                         message: "Open a book first, and then give it its original file back.")
+            return
+        }
+        guard let spec = specs.first(where: { $0.supportsLibrary }) else { return }
+
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.message = "Choose the original file of this book"
+        panel.begin { [weak self] response in
+            guard response == .OK, let url = panel.url else { return }
+            OriginalStore.shared.attach(documentId: id, spec: spec, fileURL: url) { [weak self] ok in
+                guard let self else { return }
+                guard ok else {
+                    self.presentError(title: "Could not attach that file",
+                                      message: "The library would not take it. A PDF or an EPUB of the same book will do.")
+                    return
+                }
+                self.loadOriginalForReader()
+            }
         }
     }
 
@@ -1192,6 +1306,7 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
         fileMenu.addItem(withTitle: "Add a Document…", action: #selector(addDocument), keyEquivalent: "o")
         fileMenu.addItem(withTitle: "New Note…", action: #selector(newNote), keyEquivalent: "n")
         fileMenu.addItem(withTitle: "Continue Reading…", action: #selector(continueReadingAction), keyEquivalent: "")
+        fileMenu.addItem(withTitle: "Attach the Original…", action: #selector(attachOriginal), keyEquivalent: "")
         fileMenu.addItem(.separator())
         fileMenu.addItem(withTitle: "Export as Separate Files…", action: #selector(exportFiles), keyEquivalent: "e")
         fileMenu.addItem(withTitle: "Export Notes…", action: #selector(exportNotes), keyEquivalent: "E")
@@ -1951,8 +2066,14 @@ final class SuiteController: NSObject, NSApplicationDelegate, WKNavigationDelega
     ///
     /// A note made from the reader remembers the chapter it was taken from,
     /// so it can be found again in the book it came from.
-    private func startNote(forDocumentId id: String, title: String, chapter: Int = 0) {
-        let note = LearningStore.shared.addNote(documentId: id, documentTitle: title, chapter: chapter)
+    private func startNote(forDocumentId id: String,
+                           title: String,
+                           chapter: Int = 0,
+                           quote: String? = nil) {
+        let note = LearningStore.shared.addNote(documentId: id,
+                                                documentTitle: title,
+                                                chapter: chapter,
+                                                quote: quote)
         showModule("notes")
         notesView.show(notes: LearningStore.shared.allNotes)
         notesView.select(noteId: note.id)

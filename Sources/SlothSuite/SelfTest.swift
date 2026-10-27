@@ -482,6 +482,127 @@ final class SelfTestRunner {
         }
     }
 
+    /// The book itself, and the notes written on it.
+    ///
+    /// The original of a document is the file the reader brought in. It is
+    /// kept beside the synthesis, because the synthesis is a distillation
+    /// and the book's own words are not in it — so the check asks the
+    /// library for those words, and then checks that a note written on a
+    /// passage keeps the passage.
+    private func checkOriginal(then: @escaping () -> Void) {
+        guard let id = LearningStore.shared.lastReadDocumentId,
+              let spec = controller.specsForTest.first(where: { $0.supportsLibrary }) else {
+            check("original.text", true, "no document to open")
+            check("original.note", true, "no document to open")
+            then()
+            return
+        }
+
+        OriginalStore.shared.load(documentId: id, spec: spec) { [weak self] document in
+            DispatchQueue.main.async {
+                guard let self else { then(); return }
+                guard let document, document.available else {
+                    // A book whose original is not here is not a fault in
+                    // the suite: the file was thrown away before it was
+                    // kept, and it can be given back.
+                    self.check("original.text", true,
+                               document?.reason ?? "the original is not here")
+                    self.check("original.note", true, "no original to write on")
+                    then()
+                    return
+                }
+
+                let words = document.chapters.reduce(0) { $0 + $1.wordCount }
+                self.check("original.text", !document.chapters.isEmpty && words > 0,
+                           "\(document.chapters.count) chapters, \(words.formatted()) words")
+
+                // The rule for the book's own heading. A heading that says
+                // what the title already says is noise and goes; one that
+                // says something else is the book's own structure and
+                // stays. Getting this wrong either repeats the title or
+                // throws away the first line of the book.
+                let sample = OriginalChapter(
+                    id: 1,
+                    title: "I THE EXPERIMENT",
+                    text: "I\tTHE EXPERIMENT\tI was sitting alone in my room, and the clock was striking the hour.",
+                    wordCount: 16
+                )
+                let dropped = sample.paragraphs(withoutHeadings: ["I THE EXPERIMENT"])
+                let kept = sample.paragraphs(withoutHeadings: ["A Briefing Of The Book"])
+                let ruleRight = dropped.count == 1
+                    && dropped.first?.hasPrefix("I was sitting alone") == true
+                    && kept.count == 3
+                self.check("original.heading", ruleRight,
+                           ruleRight ? "the duplicate heading goes, the real first line stays"
+                                     : "the heading rule is wrong")
+
+                // The book's own words have to be on the page when the
+                // reader is showing the book, and the briefing's front page
+                // has to be gone.
+                let reader = self.controller.readerViewForTest
+                reader.setOriginal(document)
+                reader.showOriginalForTest()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
+                    guard let self else { then(); return }
+                    let page = reader.briefingTextForTest
+                    let probe = Self.rareWord(in: document.chapters.first?.text ?? "")
+                    let hasWords = probe.isEmpty ? false : page.contains(probe)
+                    let stillBriefing = page.lowercased().contains("executive briefing & thesis")
+                    self.check("original.page", hasWords && !stillBriefing,
+                               hasWords
+                               ? (stillBriefing ? "the briefing was still on the page"
+                                                : "the book's own words are on the page")
+                               : "the book's words are not on the page")
+
+                    // A note written on a passage keeps the passage.
+                    let quote = document.chapters.first?.paragraphs.first ?? ""
+                    let note = LearningStore.shared.addNote(documentId: id,
+                                                            documentTitle: document.title,
+                                                            chapter: 1,
+                                                            quote: quote)
+                    let kept = note.quote == quote && note.isAttachedToPassage
+                    LearningStore.shared.deleteNote(id: note.id)
+                    self.check("original.note", kept, "the note kept the passage")
+
+                    // And a note takes the reader back to the passage it was
+                    // written about: the book opens at that chapter, in its
+                    // own words, with the passage chosen.
+                    let chapter = min(2, document.chapters.count)
+                    let passage = Self.rareWord(in: document.chapters[chapter - 1].text)
+                    reader.showPassage(chapter: chapter, quote: passage)
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+                        guard let self else { then(); return }
+                        let selected = reader.selectedPassageForTest
+                        let landed = reader.isShowingOriginalForTest
+                            && reader.currentChapterForTest == chapter
+                            && !passage.isEmpty
+                            && selected.localizedCaseInsensitiveContains(passage)
+                        self.check("original.journey", landed,
+                                   landed ? "the note took the reader back to the passage"
+                                          : "the passage was not found in the book")
+                        then()
+                    }
+                }
+            }
+        }
+    }
+
+    /// A word from the middle of a text that is unlikely to be anywhere else.
+    ///
+    /// The page is checked for the book's own words, so the word has to be
+    /// one that is hard to find by accident. A long word from the middle
+    /// of the chapter will do; a short one might be on the page for
+    /// entirely different reasons.
+    private static func rareWord(in text: String) -> String {
+        let words = text.split(whereSeparator: { $0.isWhitespace }).map(String.init)
+        guard words.count > 12 else { return words.first ?? "" }
+        let middle = words[words.count / 3 ..< words.count * 2 / 3]
+        let long = middle
+            .filter { $0.count >= 9 }
+            .filter { $0.allSatisfy { $0.isLetter || $0 == "'" } }
+        return long.first ?? middle.first ?? ""
+    }
+
     /// The last check: a book opens on its briefing.
     ///
     /// Every book opens at the front of the book — the executive briefing,
@@ -1092,7 +1213,9 @@ final class SelfTestRunner {
                 self.checkSendToNotes { [self] in
                     self.checkAudioStop { [self] in
                         self.checkVoices { [self] in
-                            self.checkReaderOpensOnItsBriefing()
+                            self.checkOriginal { [self] in
+                                self.checkReaderOpensOnItsBriefing()
+                            }
                         }
                     }
                 }

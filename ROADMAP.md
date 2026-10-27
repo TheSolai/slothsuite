@@ -727,6 +727,15 @@ inside the `mac.chat` check's aftermath: that check blocks the main thread
 for about a minute and a half, and the crash came in the burst of queued
 work that followed.
 
+It was caught twice more on the same day, both times while the pop-out
+window was being closed, and both times with a different signature — a
+message to a window that was no longer there, and then a double release at
+the end of the run loop's autorelease pool. Both were caused by changes
+made here to the pop-out, not by the pop-out itself: asking a closed
+window whether it is visible, and letting a closed window go while AppKit
+was still closing it. Both were undone; the pop-out now keeps a plain flag
+instead of asking the window anything.
+
 What has been ruled out: it is not the Phase 11 or Phase 12 code — the two
 functions it lands in are from Phase 4 and have not been touched since;
 AddressSanitizer reports no use-after-free; and the suite contains no
@@ -793,6 +802,129 @@ better than a book that is not read at all.
 All three are in the gate, and they use the real Ollama on this machine
 rather than a mock. If Ollama is not running they say so and the gate
 carries on: a fact about the machine is not a fault in the suite.
+
+## Phase 14 — the original file
+
+*"It's good and you're doing well, but we also need to be able to open the
+original file and attach notes etc. to that."*
+
+The briefing is a distillation. It was the only face of the book the reader
+could see, and the book itself had been thrown away.
+
+### The file was being deleted
+
+The backend deleted every uploaded original once the synthesis was done. The
+comment said the reason: *"every book was stored twice forever."* It was
+never twice. The synthesis is a summary; the book's own words are not in it
+anywhere. Six of the seven books in the library had already lost their file
+by the time this was found.
+
+The file is now **kept**, and the originals of all seven books were given
+back from the reader's own disk. Nothing was summarised again and nothing was
+paid for twice.
+
+### Two faces of the same book
+
+The library serves the original's text (`GET /api/documents/{id}/original`),
+parsed by the same parser the synthesis used — EPUB through ebooklib, PDF
+through pypdf — and a book whose file is missing can be given one back
+(`POST /api/documents/{id}/original`) without a second synthesis.
+
+The two line up. Across the library the briefing's chapters and the parsed
+original's chapters are one for one: 64 = 64 for *House of Leaves*, 37 = 37
+for the Tarot. So the reader has a **Briefing │ Original** switch, and it
+changes the body and nothing else — the chapter bar, the chapter numbers and
+the place you left are the same in both.
+
+**Original** is one chapter to a page. A whole book in a single text view is
+a million words of layout for a page the reader can only look at one part
+of.
+
+### What the original mode puts away
+
+The rail — the briefing's three takeaways, its glossary, its read-aloud — and
+the strip of key terms above the page are both the briefing's *analysis of*
+the book. While the book itself is being read they are noise between the
+reader and the words, so they are put away and the page takes the whole
+width.
+
+The page keeps the briefing's title, because it says more than the file's
+own: *"Chapter 3"* is a worse name for a chapter than the one the briefing
+gives it. The book's own heading is dropped only when it says the same thing
+as the title. A heading that says something else stays, because that is the
+book's own structure and not a copy of the title.
+
+### A note on a passage
+
+In the original, **Add Note** attaches the selection: the note keeps the
+words (`quote`) and the chapter, the notes list shows the passage in teal,
+and **Show the passage** on a note's row menu opens the book at that chapter
+with the passage chosen and the eye sent to it.
+
+A note in the briefing is still a plain note. The two kinds are told apart
+by whether they carry a passage, and only the rows that do are made taller —
+the ordinary list stays dense.
+
+### How it is checked
+
+- `original.text` checks that the library still has the original and that
+  the pages it serves have real words in them.
+- `original.heading` checks the heading rule directly: a heading that says
+  what the title says is dropped, a heading that says something else is kept,
+  and the book's first real line is never lost.
+- `original.page` checks that the original mode really puts the book's words
+  on the page, and that the briefing's front page is gone.
+- `original.note` checks that a note written on a passage keeps the passage.
+- `original.journey` checks the whole way back: the book opens at that
+  chapter, in its own words, with the passage chosen and the eye sent to it.
+
+Two bugs were found while writing that last one, and both were invisible
+until the passage was followed all the way back:
+
+- The reader was sent to **whatever chapter the briefing happened to be
+  standing at** rather than to the chapter the note was written in, so a
+  note about chapter 10 opened chapter 3 and the passage was never found.
+- A fetch that finished **after the reader had moved to another book** put
+  the first book's own words under the reader's eyes. The original now has
+  to belong to the book that is on the page.
+
+### A closed window that kept talking
+
+The third bug was not in the new work at all. It was in the pop-out window,
+and it had been there since Phase 10.
+
+The pop-out is a second window onto the same book, so the two keep each
+other in step: when the reader moves in one, the other follows. But the
+pop-out's reader view was never disconnected when the window was closed. It
+kept its place, kept its scroll, and — because a scroll reports where the
+reader is — **kept telling the suite where it was**, and the suite, in the
+way it always has, moved the window that was still open to match.
+
+The damage was small but exact. The reader opened a book at its front, and
+a moment later the open window was dragged a hundred pages into the middle
+of it, because a window that was no longer on the screen had said so.
+
+The pop-out now stops talking when it is closed. Its place is still saved —
+that happens as it goes — but a window that is not on the screen no longer
+moves the window that is.
+
+It keeps a plain flag for this rather than asking the window whether it is
+visible. Asking a closed window that question is a use-after-free waiting
+to happen, and it crashed the gate twice before it was found; the flag is
+the same answer without the question.
+
+This was found by a gate check that failed for a reason nobody expected: the
+reader opened on its briefing with `chapter=2` while the page said chapter
+zero. Logging where the chapter was set from, with a stack, named the
+culprit in one run: `follow(to:scroll:)` → `reportPosition` → a reader that
+had been closed minutes earlier.
+
+The heading rule was checked against **every chapter of every book in the
+library** before it was trusted: 260 chapters, 81 of which had a heading
+that duplicated the title, and not one chapter that lost a word. Two bugs
+were found that way — a rule that dropped eight Tarot chapters *entirely*,
+because the book separates a heading from its text with a line break and the
+rule was counting words where it meant to count paragraphs.
 
 ## Phase 7 — the fourth ten: a learning desk that remembers
 
@@ -982,7 +1114,7 @@ Building the gate found four real defects that had been invisible:
 
 ## Verified
 
-The gate (`./build.sh test`) is green at **66/66**, exit 0:
+The gate (`./build.sh test`) is green at **71/71**, exit 0:
 
 ```
 config.apps, config.services, stack.script, stack.ports.read,
@@ -996,6 +1128,8 @@ reader.width, reader.briefing, reader.popout, reader.opening,
 reader.keepsplace, notes.send, library.menu, library.rightclick,
 audio.stop, audio.stop.live, audio.stopped,
 voice.chunk, voice.list, voice.phonon,
+original.text, original.heading, original.page, original.note,
+original.journey,
 web.endpoint.read, provider.endpoint, mac.service, mac.chat, mac.speak,
 selftest.fixture, filepicker.fired, upload.pipeline, reader.position,
 reader.persist, notes.chapter, notes.export, library.sort, library.bulk,

@@ -419,6 +419,38 @@ different width in every window. The text leaves a band for them and the
 painter fills it. The words are in the text in a colour nobody can see, so
 ⌘F still finds "335 min" and ⌘A still copies it.
 
+## The book itself
+
+The briefing is a distillation. The book is the book, and the reader has it
+too.
+
+- **Briefing │ Original**, in the chapter row, switches between the two. The
+  chapter bar, the chapter numbers and the place you left are the same in
+  both — they are two faces of one book, not two books.
+- **Original** shows the book's own words, one chapter to a page, in
+  paragraphs. The rail and the strip of key terms are put away while the book
+  is being read: they are the briefing's analysis of the book, not the book.
+- The page title is still the briefing's title, because it says more than the
+  file's own — "Chapter 3" is a worse name for a chapter than the one the
+  briefing gives it. The book's own heading is dropped only when it says the
+  same thing as the title; a heading that says something else stays, because
+  that is the book's own structure rather than a copy.
+- **Select any passage and press Add Note** to write a note about those
+  words. The note keeps the passage and the chapter, and the note list shows
+  the passage in teal.
+- **Show the passage** on a note's row menu opens the book at that chapter,
+  with the passage chosen and the eye sent to it.
+
+The words come from the file the reader brought in, and that file is now
+**kept**. The library used to delete it once the book had been summarised, on
+the grounds that it was stored twice. It was not: the summary is a
+distillation, and the book's own words are not in it. Six of the seven books
+in the library had lost their file; all of them were given back.
+
+A book whose file is missing says so, and **File ▸ Attach the Original…**
+gives it back from your own disk — the same file, against the same book,
+without paying for another synthesis.
+
 ## Reading position
 
 The reader remembers where you were, and offers it back.
@@ -633,6 +665,13 @@ The voices are checked against the real Ollama on this machine: that a long
 text is split into pieces Ollama will accept, that the voices can be
 fetched, and that Ollama returns actual audio. If Ollama is not running the
 checks say so and the gate carries on.
+
+The book itself is checked too: that the library still has the original
+file, that the pages it serves have real words in them, that the book's own
+duplicate heading is dropped while its first real line is kept, that the
+original mode really puts the book's words on the page instead of the
+briefing's, that a note written on a passage keeps the passage, and that a
+note takes the reader back to the passage it was written about.
 
 A run leaves the reader's own books exactly as it found them: the whole
 learning store — notes, places, favourites, read state, the "continue

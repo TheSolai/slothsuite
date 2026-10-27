@@ -33,6 +33,11 @@ final class ReaderView: NSView {
     var onOpenChapters: ((Briefing) -> Void)?
     /// The user wants to write a note about this document.
     var onAddNote: ((Briefing) -> Void)?
+    /// The original of the book being read is wanted.
+    var onRequestOriginal: (() -> Void)?
+    /// The user wants a note on a passage of the original: the words they
+    /// selected, and the chapter they came from.
+    var onAddNoteForPassage: ((String, Int) -> Void)?
     /// Open this document in the wrapped web app.
     var onOpenInApp: ((Briefing) -> Void)?
     /// Export this briefing.
@@ -89,6 +94,12 @@ final class ReaderView: NSView {
     private let bodyScroll = NSScrollView()
     private let textView = ReaderTextView()
 
+    /// Which face of the book is being read.
+    private let modeControl = NSSegmentedControl(labels: ["Briefing", "Original"],
+                                                 trackingMode: .selectOne,
+                                                 target: nil,
+                                                 action: nil)
+
     private let overlay = NSView()
     private let loadingStack = NSStackView()
     private let spinner = NSProgressIndicator()
@@ -100,6 +111,29 @@ final class ReaderView: NSView {
     // MARK: State
 
     private var briefing: Briefing?
+
+    /// Which face of the book is being read.
+    ///
+    /// The briefing is a distillation of the book. The original is the
+    /// book. They are two ways of reading the same thing, and the
+    /// chapters are the same in both, so the choice is about the words on
+    /// the page and nothing else.
+    enum ReaderMode: Int {
+        case briefing
+        case original
+    }
+    private var mode: ReaderMode = .briefing
+
+    /// The book's own text, when it has been loaded.
+    private var original: OriginalDocument?
+
+    /// A passage to show, once the book is there.
+    ///
+    /// A note links back to the words it was written about. The book has
+    /// to be open and the original has to be here before the passage can
+    /// be found, so the request waits.
+    private var pendingPassage: (chapter: Int, quote: String)?
+
     /// The character range of each chapter heading, in document order.
     /// Index 0 is the first chapter; the overview that precedes it is index 0
     /// in the public API and is not in this array.
@@ -412,7 +446,20 @@ final class ReaderView: NSView {
         headerView.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -28).isActive = true
         headerView.topAnchor.constraint(equalTo: topAnchor, constant: 18).isActive = true
 
-        chapterScroll.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 28).isActive = true
+        // The switch between the briefing and the book itself sits to the
+        // left of the chapter row: the two are the same book, read two
+        // ways, so the choice belongs beside the chapters.
+        modeControl.selectedSegment = 0
+        modeControl.target = self
+        modeControl.action = #selector(modeChanged(_:))
+        modeControl.controlSize = .small
+        modeControl.font = Typography.body(weight: .medium)
+        modeControl.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(modeControl)
+        modeControl.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 28).isActive = true
+        modeControl.centerYAnchor.constraint(equalTo: chapterScroll.centerYAnchor).isActive = true
+
+        chapterScroll.leadingAnchor.constraint(equalTo: modeControl.trailingAnchor, constant: 12).isActive = true
         chapterScroll.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -28).isActive = true
         overviewView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 28).isActive = true
         overviewView.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -28).isActive = true
@@ -456,6 +503,12 @@ final class ReaderView: NSView {
               saved: ReadingPosition? = nil) {
         self.briefing = briefing
         self.savedPosition = saved
+
+        // A new book is shown as its briefing, and the original is fetched
+        // only if the reader asks for it.
+        mode = .briefing
+        modeControl.selectedSegment = ReaderMode.briefing.rawValue
+        original = nil
 
         titleLabel.stringValue = briefing.title
         let author = briefing.author.isEmpty ? briefing.filename : briefing.author
@@ -531,6 +584,220 @@ final class ReaderView: NSView {
                 pendingRestore = (index, fraction)
             }
         }
+    }
+
+    // MARK: - The book itself
+
+    /// Which face of the book to show.
+    @objc private func modeChanged(_ sender: NSSegmentedControl) {
+        guard let new = ReaderMode(rawValue: sender.selectedSegment) else { return }
+        setMode(new)
+    }
+
+    /// Show the briefing, or the book itself.
+    func setMode(_ new: ReaderMode) {
+        guard new != mode else { return }
+        mode = new
+        modeControl.selectedSegment = new.rawValue
+        switch new {
+        case .briefing:
+            renderBriefing()
+        case .original:
+            renderOriginal()
+        }
+    }
+
+    /// The original of the book being read.
+    ///
+    /// The controller fetches it and hands it over; the reader does not
+    /// know where the library lives.
+    func setOriginal(_ document: OriginalDocument?) {
+        guard let document else { return }
+        // The original of a book that is not the one on the page is not this
+        // page's original. A fetch that finished after the reader had moved
+        // on to another book must not put the wrong book under their eyes.
+        guard document.documentId == briefing?.documentId else { return }
+        original = document
+        if mode == .original {
+            renderOriginal()
+        }
+    }
+
+    /// Put the briefing's strip of key terms away, or bring it back.
+    ///
+    /// The strip is the briefing's own index of the book: how many words
+    /// it has, and which of them matter most. It is a summary of a
+    /// summary, and while the book itself is on the page it is noise
+    /// between the reader and the words. The chips in it also lead to the
+    /// briefing's chapters, which is not where the reader is standing.
+    private func setOverviewVisible(_ visible: Bool) {
+        let hidden = !visible
+        guard overviewView.isHidden != hidden else { return }
+        overviewView.isHidden = hidden
+        overviewView.setHeight(hidden ? 0 : ReaderOverviewView.height)
+    }
+
+    /// Put the briefing back on the page.
+    private func renderBriefing() {
+        guard let briefing else { return }
+        let built = BriefingTextBuilder.build(briefing)
+        textView.textStorage?.setAttributedString(built.string)
+        textView.ruleRange = built.thesisRange
+        textView.ruleRanges = built.ruleRanges
+        textView.cards = built.cards
+        textView.statRow = built.statRow
+        textView.chips = built.chips
+        textView.keywords = built.keywords
+        textView.needsDisplay = true
+        chapterRanges = built.chapterRanges
+        bodyScroll.contentView.scroll(to: .zero)
+        currentChapter = 0
+        lastReportedChapter = 0
+        updatePillSelection()
+        updatePillars()
+        setOverviewVisible(true)
+        layoutSubtreeIfNeeded()
+        layoutBodyArea()
+    }
+
+    /// Show the book itself.
+    private func renderOriginal() {
+        guard let original else {
+            // It has not been fetched yet. Ask for it; the page will be
+            // drawn when it arrives.
+            onRequestOriginal?()
+            return
+        }
+        guard original.available else {
+            renderOriginalMissing(original)
+            return
+        }
+        guard !original.chapters.isEmpty else {
+            renderOriginalMissing(original, reason: "The original of this book has no readable text.")
+            return
+        }
+        // A passage that was asked for decides the chapter. The reader is
+        // going to a place, not to wherever the briefing happened to be
+        // standing when the note was made.
+        let wanted = pendingPassage?.chapter ?? currentChapter
+        renderOriginalChapter(min(max(wanted, 1), original.chapters.count))
+    }
+
+    /// The original is not on this machine.
+    ///
+    /// The book was summarised and the file was thrown away afterwards, so
+    /// the words of it are gone. It can be given back: the file is on the
+    /// reader's own disk, and the library will take it again.
+    private func renderOriginalMissing(_ original: OriginalDocument, reason: String? = nil) {
+        let built = BriefingTextBuilder.buildOriginalMissing(
+            filename: original.filename,
+            reason: reason ?? original.reason
+        )
+        textView.textStorage?.setAttributedString(built.string)
+        textView.ruleRange = built.thesisRange
+        textView.ruleRanges = built.ruleRanges
+        textView.cards = built.cards
+        textView.statRow = built.statRow
+        textView.chips = built.chips
+        textView.keywords = built.keywords
+        textView.needsDisplay = true
+        chapterRanges = built.chapterRanges
+        bodyScroll.contentView.scroll(to: .zero)
+        setOverviewVisible(false)
+        layoutSubtreeIfNeeded()
+        layoutBodyArea()
+    }
+
+    /// Show a passage of the book itself, and say so.
+    ///
+    /// This is how a note is taken back to the words it was written
+    /// about: the book opens in its original, at the chapter, with the
+    /// passage chosen and the eye sent to it.
+    func showPassage(chapter: Int, quote: String) {
+        pendingPassage = (chapter, quote)
+        mode = .original
+        modeControl.selectedSegment = ReaderMode.original.rawValue
+        renderOriginal()
+    }
+
+    /// Choose a passage in the text, and send the eye to it.
+    ///
+    /// The passage is found by its first words: the end of it may be
+    /// marked differently in the file than it was on the screen, but the
+    /// beginning is the same words.
+    private func selectPassage(_ quote: String) {
+        let text = textView.string as NSString
+        let needle = String(quote.trimmingCharacters(in: .whitespacesAndNewlines).prefix(60))
+        guard !needle.isEmpty else { return }
+        let range = text.range(of: needle, options: [.caseInsensitive])
+        guard range.location != NSNotFound else { return }
+        textView.setSelectedRange(range)
+        textView.scrollRangeToVisible(range)
+    }
+
+    /// Put a chapter of the book itself on the page.
+    ///
+    /// The original is one chapter at a time. A whole book in one text
+    /// view would be a million words of layout for a page the reader can
+    /// only look at one part of.
+    private func renderOriginalChapter(_ index: Int) {
+        guard let original, original.available else { return }
+        guard index >= 1, index <= original.chapters.count else { return }
+        let chapter = original.chapters[index - 1]
+
+        // The briefing's title for the chapter says more than the file's
+        // own, which is often just "Chapter 3".
+        let title = chapterTitle(index)
+        let built = BriefingTextBuilder.buildOriginal(
+            chapter: chapter,
+            number: index,
+            of: original.chapters.count,
+            title: title
+        )
+        textView.textStorage?.setAttributedString(built.string)
+        textView.ruleRange = built.thesisRange
+        textView.ruleRanges = built.ruleRanges
+        textView.cards = built.cards
+        textView.statRow = built.statRow
+        textView.chips = built.chips
+        textView.keywords = built.keywords
+        textView.needsDisplay = true
+        chapterRanges = built.chapterRanges
+
+        currentChapter = index
+        lastReportedChapter = index
+        updatePillSelection()
+        updatePillars()
+        bodyScroll.contentView.scroll(to: .zero)
+        setOverviewVisible(false)
+        layoutSubtreeIfNeeded()
+        layoutBodyArea()
+
+        // A passage that was asked for is in this chapter.
+        if let pending = pendingPassage {
+            if pending.chapter == index {
+                pendingPassage = nil
+                selectPassage(pending.quote)
+            } else if pending.chapter > original.chapters.count {
+                // The chapter the passage was written in is not in this
+                // book, so there is nothing to look for and no reason to
+                // keep looking.
+                pendingPassage = nil
+            }
+        }
+    }
+
+    /// In the original, a chapter is a page of the book, and the page is
+    /// built when it is asked for.
+    private func goToOriginalChapter(_ index: Int) {
+        guard let original, original.available else { return }
+        if index == 0 {
+            // The overview is the briefing's own front page.
+            setMode(.briefing)
+            return
+        }
+        renderOriginalChapter(index)
+        onChapterChanged?(index)
     }
 
     /// Go back to the place the reader left.
@@ -744,7 +1011,11 @@ final class ReaderView: NSView {
         guard available > 0 else { return }
 
         let railWidth = ReaderPillarsView.width
-        let showsRail = available >= Self.minimumColumnWidth + gap + railWidth
+        // The rail holds the briefing's distillation — its takeaways, its
+        // glossary. The book itself has none of those, and the measure of
+        // a page of a book is better without a column of summaries beside
+        // it.
+        let showsRail = mode == .briefing && available >= Self.minimumColumnWidth + gap + railWidth
 
         // The chapter bar is above the body, and this view is not flipped,
         // so the body's top edge is the chapter bar's *bottom* edge.
@@ -804,6 +1075,11 @@ final class ReaderView: NSView {
     func goToChapter(_ index: Int) {
         guard index >= 0 else { return }
 
+        if mode == .original {
+            goToOriginalChapter(index)
+            return
+        }
+
         if index == 0 {
             lastReportedChapter = 0
             currentChapter = 0
@@ -851,6 +1127,13 @@ final class ReaderView: NSView {
     /// of the book. So the move is checked, not assumed.
     @discardableResult
     private func moveToChapter(_ index: Int, fraction: Double, report: Bool) -> Bool {
+        if mode == .original {
+            // The original is a page at a time, so the place is the page
+            // rather than a range of chapters.
+            guard index > 0 else { return false }
+            renderOriginalChapter(index)
+            return true
+        }
         guard index > 0, index - 1 < chapterRanges.count else { return false }
         guard let span = chapterSpan(index) else { return false }
 
@@ -1239,6 +1522,24 @@ final class ReaderView: NSView {
     /// Whether the stop button is live, for the self-test.
     var audioStopEnabledForTest: Bool { stopButton?.isEnabled ?? false }
 
+    /// Whether the reader is showing the book itself, for the self-test.
+    var isShowingOriginalForTest: Bool { mode == .original }
+
+    /// The chapter the reader is on, for the self-test.
+    var currentChapterForTest: Int { currentChapter }
+
+    /// The words the reader has selected, for the self-test.
+    var selectedPassageForTest: String {
+        let range = textView.selectedRange()
+        guard range.length > 0 else { return "" }
+        let string = textView.string as NSString
+        guard NSMaxRange(range) <= string.length else { return "" }
+        return string.substring(with: range)
+    }
+
+    /// Put the book itself on the page, for the self-test.
+    func showOriginalForTest() { setMode(.original) }
+
     /// Press the stop button, for the self-test.
     func pressAudioStopForTest() { stopAudioPressed() }
 
@@ -1273,6 +1574,10 @@ final class ReaderView: NSView {
 
     /// Which chapter is the reader looking at?
     private func chapterAtTopOfView() -> Int {
+        if mode == .original {
+            // The page is one chapter, so the chapter is the one being read.
+            return currentChapter
+        }
         guard !chapterRanges.isEmpty else { return 0 }
         guard let manager = textView.layoutManager, let container = textView.textContainer else { return 0 }
 
@@ -1419,7 +1724,27 @@ final class ReaderView: NSView {
 
     @objc private func addNotePressed() {
         guard let briefing else { return }
+
+        // In the book itself, a note is written on the passage the reader
+        // has selected. There is a passage to write it on, so the note
+        // knows which one.
+        if mode == .original {
+            let quote = selectedPassage()
+            if !quote.isEmpty {
+                onAddNoteForPassage?(quote, max(currentChapter, 1))
+                return
+            }
+        }
         onAddNote?(briefing)
+    }
+
+    /// The words the reader has selected.
+    private func selectedPassage() -> String {
+        let range = textView.selectedRange()
+        guard range.length > 0 else { return "" }
+        let string = textView.string as NSString
+        guard NSMaxRange(range) <= string.length else { return "" }
+        return string.substring(with: range).trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     @objc private func openInAppPressed() {
@@ -2203,6 +2528,69 @@ private final class BriefingTextBuilder {
                       ruleRanges: builder.ruleRanges)
     }
 
+    // MARK: The book itself
+
+    /// A chapter of the book itself.
+    ///
+    /// The same shape as the briefing's chapter — a kicker that says which
+    /// chapter this is, and the title — with the book's own words where the
+    /// takeaways were.
+    static func buildOriginal(chapter: OriginalChapter,
+                              number: Int,
+                              of total: Int,
+                              title: String) -> Output {
+        let builder = BriefingTextBuilder()
+        builder.air(extra: 16)
+
+        let kicker = builder.originalKicker(number: number, of: total, chapter: chapter)
+        builder.ruleRanges.append(kicker)
+        builder.chapterTitle(title)
+
+        // The line that says what a note on a passage is for. It is here,
+        // at the top of the page, because that is where the reader's eye
+        // starts.
+        builder.caption("Select any passage to write a note on it.")
+
+        // The book's file usually opens a chapter with its own heading.
+        // The page already carries a title, so a heading that says the
+        // same thing is dropped; one that says something else stays,
+        // because it is the book's own structure and not a copy.
+        for paragraph in chapter.paragraphs(withoutHeadings: [title, chapter.title]) {
+            builder.paragraph(paragraph)
+        }
+
+        return Output(string: builder.text,
+                      chapterRanges: [kicker],
+                      thesisRange: nil,
+                      cards: [],
+                      statRow: nil,
+                      chips: [],
+                      keywords: [],
+                      ruleRanges: builder.ruleRanges)
+    }
+
+    /// The page that says the original is not here.
+    static func buildOriginalMissing(filename: String, reason: String) -> Output {
+        let builder = BriefingTextBuilder()
+        builder.air(extra: 16)
+        builder.heading("The original is not on this machine")
+        builder.paragraph(reason.isEmpty
+            ? "The file was thrown away after the book was summarised, so its own words are gone."
+            : reason)
+        if !filename.isEmpty {
+            builder.caption("The book was \(filename).")
+        }
+        builder.caption("Use \u{201C}Attach the original\u{2026}\u{201D} in the File menu to give it back.")
+        return Output(string: builder.text,
+                      chapterRanges: [],
+                      thesisRange: nil,
+                      cards: [],
+                      statRow: nil,
+                      chips: [],
+                      keywords: [],
+                      ruleRanges: builder.ruleRanges)
+    }
+
     // MARK: Pieces
 
     /// A little air above a heading. Paragraph styles have no space-before,
@@ -2346,6 +2734,26 @@ private final class BriefingTextBuilder {
 
         endParagraph(font: Self.captionFont, style: Self.kickerStyle())
         return NSRange(location: start, length: text.length - start)
+    }
+
+    /// The kicker for a chapter of the book itself.
+    private func originalKicker(number: Int, of total: Int, chapter: OriginalChapter) -> NSRange {
+        let start = text.length
+        append("CHAPTER \(String(format: "%02d", number)) OF \(total)",
+               font: Self.headingFont, colour: Palette.accent, style: Self.kickerStyle(), endsParagraph: false)
+
+        var detail: [String] = ["the original"]
+        if chapter.wordCount > 0 { detail.append("~\(chapter.wordCount.formatted()) words") }
+        append("   \u{00B7}   \(detail.joined(separator: "  \u{00B7}  "))",
+               font: Self.captionFont, colour: .tertiaryLabelColor, style: Self.kickerStyle(), endsParagraph: false)
+
+        endParagraph(font: Self.captionFont, style: Self.kickerStyle())
+        return NSRange(location: start, length: text.length - start)
+    }
+
+    /// A quiet line of text.
+    private func caption(_ line: String) {
+        append(line, font: Self.captionFont, colour: .tertiaryLabelColor, style: Self.headingStyle())
     }
 
     /// The chapter's own title, set large the way the deck set it.

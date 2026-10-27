@@ -41,6 +41,9 @@ final class NotesView: NSView, NSTableViewDataSource, NSTableViewDelegate, NSTex
     var onCreateNote: (() -> Void)?
     /// The user wants to open the document a note belongs to.
     var onOpenDocument: ((StudyNote) -> Void)?
+
+    /// The user wants to see the passage a note was written about.
+    var onShowPassage: ((StudyNote) -> Void)?
     /// The user wants to search notes. Pass the raw query text.
     var onSearch: ((String) -> Void)?
 
@@ -458,15 +461,25 @@ final class NotesView: NSView, NSTableViewDataSource, NSTableViewDelegate, NSTex
 
     // MARK: - Public API
 
+    /// Notes put into the list by the snapshot harness.
+    ///
+    /// A row that carries a passage cannot be looked at from the reader's
+    /// own notes, because none of them do yet. These are put into the
+    /// *list* and not into the store: a render must not change what is on
+    /// the disk, and the list is redrawn whenever the store changes, so
+    /// they are kept here and put back every time.
+    var injectedNotes: [StudyNote] = []
+
     /// Replace the visible list of notes.
     func show(notes: [StudyNote]) {
-        self.notes = notes
+        let all = injectedNotes + notes
+        self.notes = all
 
-        countLabel.stringValue = notes.isEmpty
+        countLabel.stringValue = all.isEmpty
             ? ""
-            : "\(notes.count) note\(notes.count == 1 ? "" : "s")"
+            : "\(all.count) note\(all.count == 1 ? "" : "s")"
 
-        let isEmpty = notes.isEmpty
+        let isEmpty = all.isEmpty
         listEmptyState.isHidden = !isEmpty
         listScrollView.isHidden = isEmpty
 
@@ -475,11 +488,11 @@ final class NotesView: NSView, NSTableViewDataSource, NSTableViewDelegate, NSTex
         // Keep the current row selected when the note is still on screen: the
         // controller calls this after every change, including the ones the
         // editor itself causes.
-        if let id = currentNoteId, let index = notes.firstIndex(where: { $0.id == id }) {
+        if let id = currentNoteId, let index = all.firstIndex(where: { $0.id == id }) {
             isUpdatingSelection = true
             tableView.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false)
             isUpdatingSelection = false
-        } else if currentNoteId == nil, let first = notes.first {
+        } else if currentNoteId == nil, let first = all.first {
             // Nothing is open yet, so open the first note. A notes desk that
             // always starts on an empty placeholder is a notes desk you have
             // to click into before it shows you anything.
@@ -689,6 +702,13 @@ final class NotesView: NSView, NSTableViewDataSource, NSTableViewDelegate, NSTex
         return cell
     }
 
+    /// A row with a passage on it is taller: the passage is the anchor of
+    /// the note, and it needs room to be read.
+    func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
+        guard row >= 0, row < notes.count else { return 50 }
+        return notes[row].isAttachedToPassage ? 70 : 50
+    }
+
     func tableViewSelectionDidChange(_ notification: Notification) {
         guard !isUpdatingSelection else { return }
 
@@ -736,6 +756,15 @@ final class NotesView: NSView, NSTableViewDataSource, NSTableViewDelegate, NSTex
         open.tag = NotesMenuTag.open
         menu.addItem(open)
 
+        // A note written on a passage can be taken back to it.
+        if let note = notes.first(where: { $0.id == noteId }), note.isAttachedToPassage {
+            let passage = NSMenuItem(title: "Show the passage", action: #selector(handleRowMenu(_:)), keyEquivalent: "")
+            passage.target = self
+            passage.representedObject = noteId
+            passage.tag = NotesMenuTag.passage
+            menu.addItem(passage)
+        }
+
         menu.addItem(.separator())
 
         let delete = NSMenuItem(title: "Delete note", action: #selector(handleRowMenu(_:)), keyEquivalent: "")
@@ -752,6 +781,7 @@ final class NotesView: NSView, NSTableViewDataSource, NSTableViewDelegate, NSTex
               let note = notes.first(where: { $0.id == id }) else { return }
         switch sender.tag {
         case NotesMenuTag.open: onOpenDocument?(note)
+        case NotesMenuTag.passage: onShowPassage?(note)
         case NotesMenuTag.delete: onDeleteNote?(note)
         default: break
         }
@@ -861,6 +891,8 @@ final class NotesView: NSView, NSTableViewDataSource, NSTableViewDelegate, NSTex
 enum NotesMenuTag {
     static let open = 1
     static let delete = 2
+    /// Take the note back to the passage it was written about.
+    static let passage = 3
 }
 
 // MARK: - The row
@@ -880,6 +912,8 @@ final class NoteRowView: NSTableCellView {
     private let previewLabel = NSTextField(labelWithString: "")
     private let documentLabel = NSTextField(labelWithString: "")
     private let dateLabel = NSTextField(labelWithString: "")
+    /// The passage of the book the note is about, when it is about one.
+    private let quoteLabel = NSTextField(labelWithString: "")
 
     /// The row's menu button. The list pops the menu up from here.
     let menuButton = NSButton(title: "", target: nil, action: nil)
@@ -900,11 +934,12 @@ final class NoteRowView: NSTableCellView {
         previewLabel.translatesAutoresizingMaskIntoConstraints = false
         documentLabel.translatesAutoresizingMaskIntoConstraints = false
         dateLabel.translatesAutoresizingMaskIntoConstraints = false
+        quoteLabel.translatesAutoresizingMaskIntoConstraints = false
 
         super.init(frame: frameRect)
         // The table owns the row's frame; only the chrome inside it is ours
         // to place, so the row itself keeps its autoresizing mask.
-        handOverToAutoLayout(previewLabel, documentLabel, dateLabel)
+        handOverToAutoLayout(previewLabel, documentLabel, dateLabel, quoteLabel)
 
         // The accent pill is drawn by the row itself: the table's own
         // highlight is switched off so that the selected row looks like a
@@ -920,6 +955,7 @@ final class NoteRowView: NSTableCellView {
         documentLabel.font = .systemFont(ofSize: 11)
         documentLabel.textColor = .secondaryLabelColor
         documentLabel.lineBreakMode = .byTruncatingTail
+        quoteLabel.lineBreakMode = .byTruncatingTail
 
         dateLabel.font = .systemFont(ofSize: 11)
         dateLabel.textColor = .tertiaryLabelColor
@@ -940,6 +976,7 @@ final class NoteRowView: NSTableCellView {
         addSubview(previewLabel)
         addSubview(documentLabel)
         addSubview(dateLabel)
+        addSubview(quoteLabel)
         addSubview(menuButton)
 
         selectionBackground.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 4).isActive = true
@@ -962,6 +999,11 @@ final class NoteRowView: NSTableCellView {
 
         dateLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12).isActive = true
         dateLabel.centerYAnchor.constraint(equalTo: documentLabel.centerYAnchor).isActive = true
+
+        // The passage the note is about, under the note's own words.
+        quoteLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12).isActive = true
+        quoteLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12).isActive = true
+        quoteLabel.topAnchor.constraint(equalTo: documentLabel.bottomAnchor, constant: 3).isActive = true
     }
 
     @available(*, unavailable)
@@ -980,6 +1022,19 @@ final class NoteRowView: NSTableCellView {
             ? note.chapterLabel
             : "\(note.documentTitle) · \(note.chapterLabel)"
         dateLabel.stringValue = NotesView.relativeDate(note.updatedAt)
+
+        // The passage the note is about. A note written against the book
+        // itself holds the words it was written about, so the note can be
+        // found in the book and not only remembered as being in it.
+        if note.isAttachedToPassage {
+            quoteLabel.stringValue = "\u{201C}\(note.quotePreview)\u{201D}"
+            quoteLabel.textColor = Palette.teal.withAlphaComponent(0.9)
+            quoteLabel.font = Typography.caption()
+            quoteLabel.isHidden = false
+        } else {
+            quoteLabel.stringValue = ""
+            quoteLabel.isHidden = true
+        }
 
         updateSelectionAppearance()
     }

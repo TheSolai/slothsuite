@@ -38,6 +38,17 @@ final class ReaderWindowController: NSObject, NSWindowDelegate {
     private var window: NSWindow?
     private let readerView = ReaderView()
 
+    /// The window has been closed.
+    ///
+    /// The reader inside it is still alive — its place is still there — but
+    /// it is not a reader the reader can see, and it must not go on moving
+    /// the window that is.
+    ///
+    /// This is a flag of our own rather than a question asked of the
+    /// window. A window that has been closed is a window that AppKit has
+    /// finished with, and asking it a question is a use-after-free.
+    private var isClosed = false
+
     private override init() {
         super.init()
 
@@ -64,10 +75,17 @@ final class ReaderWindowController: NSObject, NSWindowDelegate {
             self?.onStopAudio?()
         }
         readerView.onChapterChanged = { [weak self] chapter in
-            self?.onChapterChanged?(chapter)
+            // A window that has been closed is not a reader any more. It
+            // keeps its place, and that place is saved when it goes, but it
+            // must not go on moving the window that is still open — a
+            // closed window that keeps talking will drag the open one away
+            // from the page it was just given.
+            guard let self, !self.isClosed else { return }
+            self.onChapterChanged?(chapter)
         }
         readerView.onPositionChanged = { [weak self] document, chapter, scroll in
-            self?.onPositionChanged?(document, chapter, scroll)
+            guard let self, !self.isClosed else { return }
+            self.onPositionChanged?(document, chapter, scroll)
         }
     }
 
@@ -76,6 +94,7 @@ final class ReaderWindowController: NSObject, NSWindowDelegate {
     /// Open the window for a briefing, or bring it forward if it is already
     /// open.
     func show(briefing: Briefing, opening: ReaderOpening, saved: ReadingPosition?) {
+        isClosed = false
         if window == nil {
             buildWindow()
         }
@@ -88,7 +107,10 @@ final class ReaderWindowController: NSObject, NSWindowDelegate {
 
     /// Take the window away.
     func close() {
+        // The place is saved and said while the window is still open, so
+        // the window that stays ends up where the reader was.
         readerView.flushPosition()
+        isClosed = true
         window?.close()
     }
 
@@ -140,5 +162,6 @@ final class ReaderWindowController: NSObject, NSWindowDelegate {
         // The place is saved even if the reader is still moving when the
         // window goes.
         readerView.flushPosition()
+        isClosed = true
     }
 }
